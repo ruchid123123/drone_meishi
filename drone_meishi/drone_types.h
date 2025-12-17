@@ -21,6 +21,14 @@ struct ImuSample {
   float gz_dps;
 };
 
+struct RuntimeConfig {
+  float max_angle_deg;
+  float max_yaw_rate_dps;
+  float tilt_disarm_deg;
+  uint32_t cmd_timeout_ms;
+  uint32_t telem_period_ms;
+};
+
 struct PidTriplet {
   float kp;
   float ki;

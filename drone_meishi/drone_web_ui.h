@@ -31,6 +31,9 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
                calc(6px + env(safe-area-inset-right))
                calc(6px + env(safe-area-inset-bottom))
                calc(6px + env(safe-area-inset-left));
+      display: flex;
+      flex-direction: column;
+      gap: var(--gap);
       box-sizing: border-box;
       overflow: hidden;
       background: #fff;
@@ -72,8 +75,86 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
       gap: 6px 10px;
     }
 
+    #modeBar {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modeBtn {
+      font-size: 14px;
+      padding: 6px 10px;
+      border: 1px solid #888;
+      border-radius: 8px;
+      background: #f4f4f4;
+    }
+
+    .modeBtn.active {
+      background: #222;
+      color: #fff;
+      border-color: #222;
+    }
+
+    #controlView,
+    #settingsView {
+      flex: 1 1 auto;
+      width: 100%;
+      min-height: 0;
+    }
+
+    #settingsView {
+      display: none;
+      overflow: auto;
+    }
+
+    body[data-mode="control"] #controlView { display: block; }
+    body[data-mode="control"] #settingsView { display: none; }
+    body[data-mode="settings"] #controlView { display: none; }
+    body[data-mode="settings"] #settingsView { display: block; }
+
+    #settingsLayout {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: var(--gap);
+      align-items: center;
+      justify-content: flex-start;
+    }
+
+    #attCard {
+      width: min(320px, 96vw);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    #attCanvas {
+      width: 100%;
+      max-width: 280px;
+      aspect-ratio: 1;
+      display: block;
+      margin: 0 auto;
+      background: #f7f7f7;
+      border-radius: 10px;
+    }
+
+    #tuneCard {
+      width: min(420px, 96vw);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .section { margin-top: 8px; }
+
+    .section .row { margin-top: 6px; }
+
+    .muted { color: #666; font-size: 12px; }
+
     #app {
       height: 100%;
+      width: 100%;
       display: flex;
       flex-direction: column;
       gap: var(--gap);
@@ -127,10 +208,6 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
 
     #telemetryCard { flex: 1; overflow: hidden; }
 
-    /* PIDは今回は「1画面」を優先して隠しています。
-       使いたくなったら display:none を消してください。 */
-    #pidDetails { display: none; }
-
     @media (orientation:landscape) {
       :root{
         /* iPhone横持ちを想定して、中央パネルの幅を確保できるサイズ */
@@ -140,8 +217,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
       }
 
       #app {
-        height: 100vh;
-        height: 100svh;
+        height: 100%;
         flex-direction: row;
         align-items: stretch;
         justify-content: center;
@@ -179,6 +255,27 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         white-space: nowrap;
       }
 
+      #settingsLayout {
+        flex-direction: row;
+        align-items: stretch;
+        justify-content: center;
+      }
+
+      #attCard {
+        flex: 0 0 260px;
+      }
+
+      #attCanvas {
+        max-width: 240px;
+      }
+
+      #tuneCard {
+        flex: 1 1 360px;
+        max-width: 520px;
+        min-height: 0;
+        overflow: auto;
+      }
+
       .stick {
         width: 56px;
         height: 56px;
@@ -190,8 +287,14 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     }
   </style>
 </head>
-<body>
-  <div id="app">
+<body data-mode="control">
+  <div id="modeBar" class="card">
+    <button id="modeControl" class="modeBtn active">CONTROL</button>
+    <button id="modeSettings" class="modeBtn">SETTINGS</button>
+  </div>
+
+  <div id="controlView">
+    <div id="app">
     <div class="padCol">
       <div class="joy" id="leftJoy">
         <div class="joyLabel">Yaw / Throttle</div>
@@ -226,52 +329,84 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         </div>
       </div>
 
-      <details class="card" id="pidDetails">
-        <summary><b>PID tuning</b> (Applyで送信)</summary>
-        <div style="margin-top:10px;">
-          <div class="row">
-            <button id="syncBtn">GET</button>
-            <button id="saveBtn">SAVE</button>
-            <small>GET=機体の現在値 / SAVE=保存</small>
-          </div>
-
-          <div style="margin-top:12px;">
-            <b>Angle (Roll/Pitch)</b>
-            <div class="row">
-              Kp <input id="aKp" type="number" step="0.001">
-              Ki <input id="aKi" type="number" step="0.001">
-              Kd <input id="aKd" type="number" step="0.001">
-              <button id="applyAngle">Apply</button>
-            </div>
-          </div>
-
-          <div style="margin-top:12px;">
-            <b>Rate (Roll/Pitch)</b>
-            <div class="row">
-              Kp <input id="rKp" type="number" step="0.0001">
-              Ki <input id="rKi" type="number" step="0.0001">
-              Kd <input id="rKd" type="number" step="0.0001">
-              <button id="applyRate">Apply</button>
-            </div>
-          </div>
-
-          <div style="margin-top:12px;">
-            <b>Yaw Rate</b>
-            <div class="row">
-              Kp <input id="yKp" type="number" step="0.0001">
-              Ki <input id="yKi" type="number" step="0.0001">
-              Kd <input id="yKd" type="number" step="0.0001">
-              <button id="applyYaw">Apply</button>
-            </div>
-          </div>
-        </div>
-      </details>
     </div>
 
     <div class="padCol">
       <div class="joy" id="rightJoy">
         <div class="joyLabel">Roll / Pitch</div>
         <div class="stick" id="rightStick"></div>
+      </div>
+    </div>
+    </div>
+  </div>
+
+  <div id="settingsView">
+    <div id="settingsLayout">
+      <div class="card" id="attCard">
+        <div class="row">
+          <b>Attitude</b>
+          <span class="muted" id="attNums">-</span>
+        </div>
+        <canvas id="attCanvas"></canvas>
+        <div class="kv">
+          <div>Roll</div><div id="attRoll">-</div>
+          <div>Pitch</div><div id="attPitch">-</div>
+          <div>Yaw</div><div id="attYaw">-</div>
+        </div>
+      </div>
+
+      <div class="card" id="tuneCard">
+        <div class="row">
+          <button id="syncBtn">GET</button>
+          <button id="saveBtn">SAVE</button>
+          <span class="muted">PID + config</span>
+        </div>
+
+        <div class="section">
+          <b>Angle (Roll/Pitch)</b>
+          <div class="row">
+            Kp <input id="aKp" type="number" step="0.001">
+            Ki <input id="aKi" type="number" step="0.001">
+            Kd <input id="aKd" type="number" step="0.001">
+            <button id="applyAngle">Apply</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <b>Rate (Roll/Pitch)</b>
+          <div class="row">
+            Kp <input id="rKp" type="number" step="0.0001">
+            Ki <input id="rKi" type="number" step="0.0001">
+            Kd <input id="rKd" type="number" step="0.0001">
+            <button id="applyRate">Apply</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <b>Yaw Rate</b>
+          <div class="row">
+            Kp <input id="yKp" type="number" step="0.0001">
+            Ki <input id="yKi" type="number" step="0.0001">
+            Kd <input id="yKd" type="number" step="0.0001">
+            <button id="applyYaw">Apply</button>
+          </div>
+        </div>
+
+        <div class="section">
+          <b>Limits</b>
+          <div class="row">
+            Max angle <input id="maxAngle" type="number" step="1">
+            Max yaw <input id="maxYawRate" type="number" step="1">
+          </div>
+          <div class="row">
+            Tilt disarm <input id="tiltDisarm" type="number" step="1">
+            Cmd timeout <input id="cmdTimeout" type="number" step="10">
+          </div>
+          <div class="row">
+            Telem ms <input id="telemMs" type="number" step="10">
+            <button id="applyLimits">Apply Limits</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -286,6 +421,16 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   const motLabel = document.getElementById('mot');
   const vbattLabel = document.getElementById('vbatt');
   const fsLabel = document.getElementById('fs');
+
+  const attNums = document.getElementById('attNums');
+  const attRollLabel = document.getElementById('attRoll');
+  const attPitchLabel = document.getElementById('attPitch');
+  const attYawLabel = document.getElementById('attYaw');
+  const attCanvas = document.getElementById('attCanvas');
+  const attCtx = attCanvas ? attCanvas.getContext('2d') : null;
+
+  const modeControl = document.getElementById('modeControl');
+  const modeSettings = document.getElementById('modeSettings');
 
   const armSwitch = document.getElementById('armSwitch');
   const disarmBtn = document.getElementById('disarmBtn');
@@ -308,6 +453,13 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   const applyRate = document.getElementById('applyRate');
   const applyYaw = document.getElementById('applyYaw');
 
+  const maxAngle = document.getElementById('maxAngle');
+  const maxYawRate = document.getElementById('maxYawRate');
+  const tiltDisarm = document.getElementById('tiltDisarm');
+  const cmdTimeout = document.getElementById('cmdTimeout');
+  const telemMs = document.getElementById('telemMs');
+  const applyLimits = document.getElementById('applyLimits');
+
   const leftJoy = document.getElementById('leftJoy');
   const leftStick = document.getElementById('leftStick');
   const rightJoy = document.getElementById('rightJoy');
@@ -320,6 +472,8 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   let yaw = 0;
   let thr = 0;      // 0..1 (left stick Y)
   let armReq = 0;
+
+  let lastAtt = { roll: 0, pitch: 0, yaw: 0 };
 
   const fsMap = {
     0: 'NONE',
@@ -356,12 +510,119 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   }
 
   function updateThrottleUi() {
-    thv.textContent = thr.toFixed(2);
+    if (thv) thv.textContent = thr.toFixed(2);
+  }
+
+  function setMode(mode) {
+    document.body.dataset.mode = mode;
+    if (modeControl) modeControl.classList.toggle('active', mode === 'control');
+    if (modeSettings) modeSettings.classList.toggle('active', mode === 'settings');
+    if (mode === 'settings') {
+      armReq = 0;
+      if (armSwitch) armSwitch.checked = false;
+      thr = 0;
+      yaw = 0;
+      roll = 0;
+      pitch = 0;
+      updateThrottleUi();
+      if (leftJoy && leftStick) {
+        setStickNorm(leftJoy, leftStick, 0, throttleToNy(thr));
+      }
+      if (rightJoy && rightStick) {
+        setStickNorm(rightJoy, rightStick, 0, 0);
+      }
+      requestAnimationFrame(() => {
+        drawAttitude(lastAtt.roll, lastAtt.pitch, lastAtt.yaw);
+      });
+    }
+  }
+
+  function resizeAttCanvas() {
+    if (!attCanvas || !attCtx) return;
+    const rect = attCanvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.round(rect.width * dpr));
+    const h = Math.max(1, Math.round(rect.height * dpr));
+    if (attCanvas.width !== w || attCanvas.height !== h) {
+      attCanvas.width = w;
+      attCanvas.height = h;
+    }
+  }
+
+  function drawAttitude(rollDeg, pitchDeg, yawDeg) {
+    lastAtt = { roll: rollDeg, pitch: pitchDeg, yaw: yawDeg };
+    if (!attCanvas || !attCtx) return;
+    const rect = attCanvas.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return;
+    resizeAttCanvas();
+
+    const w = attCanvas.width;
+    const h = attCanvas.height;
+    const dpr = window.devicePixelRatio || 1;
+    const ctx = attCtx;
+    ctx.clearRect(0, 0, w, h);
+
+    const cx = w / 2;
+    const cy = h / 2;
+    const radius = Math.min(w, h) * 0.45;
+    const rollRad = rollDeg * Math.PI / 180;
+    const pitch = clamp(pitchDeg, -45, 45);
+    const offset = (pitch / 45) * radius;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.beginPath();
+    ctx.arc(0, 0, radius, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.rotate(-rollRad);
+    ctx.fillStyle = '#cfe8ff';
+    ctx.fillRect(-radius * 2, -radius * 2 + offset, radius * 4, radius * 2);
+    ctx.fillStyle = '#d2a679';
+    ctx.fillRect(-radius * 2, offset, radius * 4, radius * 2);
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    ctx.moveTo(-radius * 2, offset);
+    ctx.lineTo(radius * 2, offset);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(cx - 10 * dpr, cy);
+    ctx.lineTo(cx + 10 * dpr, cy);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 10 * dpr);
+    ctx.lineTo(cx, cy + 10 * dpr);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(-yawDeg * Math.PI / 180);
+    ctx.fillStyle = '#333';
+    ctx.beginPath();
+    ctx.moveTo(0, -radius);
+    ctx.lineTo(-6 * dpr, -radius + 12 * dpr);
+    ctx.lineTo(6 * dpr, -radius + 12 * dpr);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
   }
 
   function connectWs() {
     ws = new WebSocket(`ws://${location.host}/ws`);
-    ws.onopen = () => { wsLabel.textContent = 'OPEN'; };
+    ws.onopen = () => {
+      wsLabel.textContent = 'OPEN';
+      if (ws && ws.readyState === 1) ws.send('GET');
+    };
     ws.onclose = () => { wsLabel.textContent = 'CLOSED'; setTimeout(connectWs, 500); };
     ws.onerror = () => { wsLabel.textContent = 'ERR'; };
     ws.onmessage = (ev) => {
@@ -369,13 +630,29 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
       try {
         const obj = JSON.parse(s);
         if (obj.type === 'tel') {
+          const rollDeg = Number(obj.roll);
+          const pitchDeg = Number(obj.pitch);
+          const yawDeg = Number(obj.yaw);
+          const rollTxt = Number.isFinite(rollDeg) ? rollDeg.toFixed(1) : '-';
+          const pitchTxt = Number.isFinite(pitchDeg) ? pitchDeg.toFixed(1) : '-';
+          const yawTxt = Number.isFinite(yawDeg) ? yawDeg.toFixed(1) : '-';
+
           stateLabel.textContent = obj.armed ? 'ARMED' : 'DISARMED';
-          attLabel.textContent = `${obj.roll.toFixed(1)}, ${obj.pitch.toFixed(1)}, ${obj.yaw.toFixed(1)}`;
+          attLabel.textContent = `${rollTxt}, ${pitchTxt}, ${yawTxt}`;
+          if (attNums) attNums.textContent = `R ${rollTxt} P ${pitchTxt} Y ${yawTxt}`;
+          if (attRollLabel) attRollLabel.textContent = rollTxt;
+          if (attPitchLabel) attPitchLabel.textContent = pitchTxt;
+          if (attYawLabel) attYawLabel.textContent = yawTxt;
+
           dtHzLabel.textContent = `${obj.dt_ms.toFixed(2)} ms / ${obj.loop_hz.toFixed(0)} Hz`;
           cmdAgeLabel.textContent = `${obj.cmd_age} ms`;
           motLabel.textContent = `${obj.m0.toFixed(2)} ${obj.m1.toFixed(2)} ${obj.m2.toFixed(2)} ${obj.m3.toFixed(2)}`;
           vbattLabel.textContent = (Number.isFinite(obj.vbatt) ? `${obj.vbatt.toFixed(2)} V` : '-');
           fsLabel.textContent = fsMap[obj.fs] || String(obj.fs);
+
+          if (Number.isFinite(rollDeg) && Number.isFinite(pitchDeg) && Number.isFinite(yawDeg)) {
+            drawAttitude(rollDeg, pitchDeg, yawDeg);
+          }
         } else if (obj.type === 'cfg') {
           if (aKp) aKp.value = obj.angle.kp;
           if (aKi) aKi.value = obj.angle.ki;
@@ -386,6 +663,13 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
           if (yKp) yKp.value = obj.yaw.kp;
           if (yKi) yKi.value = obj.yaw.ki;
           if (yKd) yKd.value = obj.yaw.kd;
+          if (obj.limits) {
+            if (maxAngle) maxAngle.value = obj.limits.max_angle;
+            if (maxYawRate) maxYawRate.value = obj.limits.max_yaw_rate;
+            if (tiltDisarm) tiltDisarm.value = obj.limits.tilt_disarm;
+            if (cmdTimeout) cmdTimeout.value = obj.limits.cmd_timeout;
+            if (telemMs) telemMs.value = obj.limits.telem_ms;
+          }
         }
       } catch (e) {
         // ignore
@@ -393,27 +677,42 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     };
   }
 
-  armSwitch.addEventListener('change', () => {
-    armReq = armSwitch.checked ? 1 : 0;
-  });
+  if (modeControl) {
+    modeControl.addEventListener('click', () => setMode('control'));
+  }
+  if (modeSettings) {
+    modeSettings.addEventListener('click', () => setMode('settings'));
+  }
 
-  disarmBtn.addEventListener('click', () => {
-    armReq = 0;
-    armSwitch.checked = false;
+  if (armSwitch) {
+    armSwitch.addEventListener('change', () => {
+      armReq = armSwitch.checked ? 1 : 0;
+    });
+  }
 
-    thr = 0;
-    yaw = 0;
-    roll = 0;
-    pitch = 0;
+  if (disarmBtn) {
+    disarmBtn.addEventListener('click', () => {
+      armReq = 0;
+      if (armSwitch) armSwitch.checked = false;
 
-    updateThrottleUi();
-    setStickNorm(leftJoy, leftStick, 0, throttleToNy(thr));
-    setStickNorm(rightJoy, rightStick, 0, 0);
+      thr = 0;
+      yaw = 0;
+      roll = 0;
+      pitch = 0;
 
-    if (ws && ws.readyState === 1) {
-      ws.send('K');
-    }
-  });
+      updateThrottleUi();
+      if (leftJoy && leftStick) {
+        setStickNorm(leftJoy, leftStick, 0, throttleToNy(thr));
+      }
+      if (rightJoy && rightStick) {
+        setStickNorm(rightJoy, rightStick, 0, 0);
+      }
+
+      if (ws && ws.readyState === 1) {
+        ws.send('K');
+      }
+    });
+  }
 
   function sendPid(tag, kp, ki, kd) {
     if (!ws || ws.readyState !== 1) return;
@@ -443,6 +742,35 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   if (saveBtn) {
     saveBtn.addEventListener('click', () => {
       if (ws && ws.readyState === 1) ws.send('SAVE');
+    });
+  }
+
+  function sendCfg(key, value) {
+    if (!ws || ws.readyState !== 1) return;
+    ws.send(`CFG,${key},${value}`);
+  }
+
+  function readNumberInput(input) {
+    if (!input) return null;
+    const s = String(input.value || '').trim();
+    if (s === '') return null;
+    const v = Number(s);
+    return Number.isFinite(v) ? v : null;
+  }
+
+  if (applyLimits) {
+    applyLimits.addEventListener('click', () => {
+      const maxAngleVal = readNumberInput(maxAngle);
+      const maxYawVal = readNumberInput(maxYawRate);
+      const tiltVal = readNumberInput(tiltDisarm);
+      const cmdVal = readNumberInput(cmdTimeout);
+      const telemVal = readNumberInput(telemMs);
+
+      if (maxAngleVal !== null) sendCfg('MAX_ANGLE', maxAngleVal);
+      if (maxYawVal !== null) sendCfg('MAX_YAW_RATE', maxYawVal);
+      if (tiltVal !== null) sendCfg('TILT_DISARM', tiltVal);
+      if (cmdVal !== null) sendCfg('CMD_TIMEOUT', Math.round(cmdVal));
+      if (telemVal !== null) sendCfg('TELEM_MS', Math.round(telemVal));
     });
   }
 
@@ -543,13 +871,17 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     ws.send(`C,${thr.toFixed(3)},${roll.toFixed(3)},${pitch.toFixed(3)},${yaw.toFixed(3)},${armReq}`);
   }, 20);
 
+  window.addEventListener('resize', () => {
+    resizeAttCanvas();
+    drawAttitude(lastAtt.roll, lastAtt.pitch, lastAtt.yaw);
+  });
+
   thr = 0;
   updateThrottleUi();
+  setMode('control');
   connectWs();
 })();
 </script>
 </body>
 </html>
 )HTML";
-
-

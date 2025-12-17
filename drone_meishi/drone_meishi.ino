@@ -49,18 +49,28 @@ static const uint32_t kLoopPeriodUs = 2000;  // 500Hz
 static const float kDtMaxSec = 0.02f;
 
 // RC and arming
-static const uint32_t kCmdTimeoutMs = 300;
+static const uint32_t kDefaultCmdTimeoutMs = 300;
+static const uint32_t kMinCmdTimeoutMs = 100;
+static const uint32_t kMaxCmdTimeoutMs = 2000;
 static const float kArmThrottleMax = 0.05f;
 static const float kStickCenterMax = 0.15f;
 static const uint32_t kArmHoldMs = 800;
 
 // Limits
-static const float kMaxAngleDeg = 30.0f;
-static const float kMaxYawRateDps = 180.0f;
-static const float kTiltDisarmDeg = 80.0f;
+static const float kDefaultMaxAngleDeg = 30.0f;
+static const float kMinMaxAngleDeg = 5.0f;
+static const float kMaxMaxAngleDeg = 80.0f;
+static const float kDefaultMaxYawRateDps = 180.0f;
+static const float kMinMaxYawRateDps = 30.0f;
+static const float kMaxMaxYawRateDps = 360.0f;
+static const float kDefaultTiltDisarmDeg = 80.0f;
+static const float kMinTiltDisarmDeg = 20.0f;
+static const float kMaxTiltDisarmDeg = 85.0f;
 
 // Telemetry
-static const uint32_t kTelemPeriodMs = 50;  // 20Hz
+static const uint32_t kDefaultTelemPeriodMs = 50;  // 20Hz
+static const uint32_t kMinTelemPeriodMs = 20;
+static const uint32_t kMaxTelemPeriodMs = 500;
 
 // IMU filter
 static const float kMadgwickBeta = 0.08f;
@@ -78,6 +88,16 @@ static const float kVbattDividerRatio = 2.0f;  // 分圧比 (VBAT = Vadc * ratio
 // ============================================================
 
 static inline float clampf(float v, float vmin, float vmax) {
+  if (v < vmin) {
+    return vmin;
+  }
+  if (v > vmax) {
+    return vmax;
+  }
+  return v;
+}
+
+static inline uint32_t clampu32(uint32_t v, uint32_t vmin, uint32_t vmax) {
   if (v < vmin) {
     return vmin;
   }
@@ -141,6 +161,14 @@ static void setRcCommand(float throttle, float roll, float pitch, float yaw, boo
 // PID tunings + NVS
 // ============================================================
 
+static RuntimeConfig g_config = {
+  kDefaultMaxAngleDeg,
+  kDefaultMaxYawRateDps,
+  kDefaultTiltDisarmDeg,
+  kDefaultCmdTimeoutMs,
+  kDefaultTelemPeriodMs,
+};
+
 static Tunings g_tunings = {
   {4.0f, 0.0f, 0.0f},       // angle
   {0.010f, 0.0f, 0.0002f},  // rate
@@ -151,6 +179,14 @@ static volatile bool g_tunings_dirty = false;
 static portMUX_TYPE g_cfgMux = portMUX_INITIALIZER_UNLOCKED;
 
 static Preferences g_prefs;
+
+static void clampConfig(RuntimeConfig *cfg) {
+  cfg->max_angle_deg = clampf(cfg->max_angle_deg, kMinMaxAngleDeg, kMaxMaxAngleDeg);
+  cfg->max_yaw_rate_dps = clampf(cfg->max_yaw_rate_dps, kMinMaxYawRateDps, kMaxMaxYawRateDps);
+  cfg->tilt_disarm_deg = clampf(cfg->tilt_disarm_deg, kMinTiltDisarmDeg, kMaxTiltDisarmDeg);
+  cfg->cmd_timeout_ms = clampu32(cfg->cmd_timeout_ms, kMinCmdTimeoutMs, kMaxCmdTimeoutMs);
+  cfg->telem_period_ms = clampu32(cfg->telem_period_ms, kMinTelemPeriodMs, kMaxTelemPeriodMs);
+}
 
 static void loadTunings() {
   g_prefs.begin("drone", true);
@@ -166,6 +202,13 @@ static void loadTunings() {
   g_tunings.yaw.kp = g_prefs.getFloat("y_kp", g_tunings.yaw.kp);
   g_tunings.yaw.ki = g_prefs.getFloat("y_ki", g_tunings.yaw.ki);
   g_tunings.yaw.kd = g_prefs.getFloat("y_kd", g_tunings.yaw.kd);
+
+  g_config.max_angle_deg = g_prefs.getFloat("max_ang", g_config.max_angle_deg);
+  g_config.max_yaw_rate_dps = g_prefs.getFloat("max_yaw", g_config.max_yaw_rate_dps);
+  g_config.tilt_disarm_deg = g_prefs.getFloat("tilt_dis", g_config.tilt_disarm_deg);
+  g_config.cmd_timeout_ms = g_prefs.getUInt("cmd_to", g_config.cmd_timeout_ms);
+  g_config.telem_period_ms = g_prefs.getUInt("telem_ms", g_config.telem_period_ms);
+  clampConfig(&g_config);
 
   g_prefs.end();
 }
@@ -184,6 +227,12 @@ static void saveTunings() {
   g_prefs.putFloat("y_kp", g_tunings.yaw.kp);
   g_prefs.putFloat("y_ki", g_tunings.yaw.ki);
   g_prefs.putFloat("y_kd", g_tunings.yaw.kd);
+
+  g_prefs.putFloat("max_ang", g_config.max_angle_deg);
+  g_prefs.putFloat("max_yaw", g_config.max_yaw_rate_dps);
+  g_prefs.putFloat("tilt_dis", g_config.tilt_disarm_deg);
+  g_prefs.putUInt("cmd_to", g_config.cmd_timeout_ms);
+  g_prefs.putUInt("telem_ms", g_config.telem_period_ms);
 
   g_prefs.end();
 }
@@ -350,6 +399,7 @@ static void applyTuningsIfDirty() {
 // - PID,ANGLE,kp,ki,kd
 // - PID,RATE,kp,ki,kd
 // - PID,YAW,kp,ki,kd
+// - CFG,KEY,VALUE (MAX_ANGLE, MAX_YAW_RATE, TILT_DISARM, CMD_TIMEOUT, TELEM_MS)
 // - GET
 // - SAVE
 // - K   (kill/disarm)
@@ -361,20 +411,26 @@ static void sendCfgToClient(AsyncWebSocketClient *client) {
   }
 
   Tunings t;
+  RuntimeConfig cfg;
   portENTER_CRITICAL(&g_cfgMux);
   t = g_tunings;
+  cfg = g_config;
   portEXIT_CRITICAL(&g_cfgMux);
 
-  char buf[256];
+  char buf[384];
   snprintf(
     buf,
     sizeof(buf),
     "{\"type\":\"cfg\",\"angle\":{\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f},"
     "\"rate\":{\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f},"
-    "\"yaw\":{\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f}}",
+    "\"yaw\":{\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f},"
+    "\"limits\":{\"max_angle\":%.2f,\"max_yaw_rate\":%.2f,\"tilt_disarm\":%.2f,"
+    "\"cmd_timeout\":%lu,\"telem_ms\":%lu}}",
     t.angle.kp, t.angle.ki, t.angle.kd,
     t.rate.kp, t.rate.ki, t.rate.kd,
-    t.yaw.kp, t.yaw.ki, t.yaw.kd
+    t.yaw.kp, t.yaw.ki, t.yaw.kd,
+    cfg.max_angle_deg, cfg.max_yaw_rate_dps, cfg.tilt_disarm_deg,
+    (unsigned long)cfg.cmd_timeout_ms, (unsigned long)cfg.telem_period_ms
   );
 
   client->text(buf);
@@ -419,6 +475,39 @@ static void handlePidMsg(char *saveptr) {
   portEXIT_CRITICAL(&g_cfgMux);
 }
 
+static void handleCfgMsg(char *saveptr) {
+  // expects: KEY,VALUE
+  const char *key = strtok_r(nullptr, ",", &saveptr);
+  const char *val_s = strtok_r(nullptr, ",", &saveptr);
+
+  if (key == nullptr || val_s == nullptr) {
+    return;
+  }
+
+  const float vf = (float)atof(val_s);
+  const uint32_t vu = (uint32_t)atoi(val_s);
+
+  portENTER_CRITICAL(&g_cfgMux);
+  if (strcmp(key, "MAX_ANGLE") == 0) {
+    if (isFinitef(vf)) {
+      g_config.max_angle_deg = clampf(vf, kMinMaxAngleDeg, kMaxMaxAngleDeg);
+    }
+  } else if (strcmp(key, "MAX_YAW_RATE") == 0) {
+    if (isFinitef(vf)) {
+      g_config.max_yaw_rate_dps = clampf(vf, kMinMaxYawRateDps, kMaxMaxYawRateDps);
+    }
+  } else if (strcmp(key, "TILT_DISARM") == 0) {
+    if (isFinitef(vf)) {
+      g_config.tilt_disarm_deg = clampf(vf, kMinTiltDisarmDeg, kMaxTiltDisarmDeg);
+    }
+  } else if (strcmp(key, "CMD_TIMEOUT") == 0) {
+    g_config.cmd_timeout_ms = clampu32(vu, kMinCmdTimeoutMs, kMaxCmdTimeoutMs);
+  } else if (strcmp(key, "TELEM_MS") == 0) {
+    g_config.telem_period_ms = clampu32(vu, kMinTelemPeriodMs, kMaxTelemPeriodMs);
+  }
+  portEXIT_CRITICAL(&g_cfgMux);
+}
+
 static void handleWsText(AsyncWebSocketClient *client, char *msg) {
   if (msg == nullptr) {
     return;
@@ -451,6 +540,11 @@ static void handleWsText(AsyncWebSocketClient *client, char *msg) {
 
   if (strcmp(head, "PID") == 0) {
     handlePidMsg(saveptr);
+    return;
+  }
+
+  if (strcmp(head, "CFG") == 0) {
+    handleCfgMsg(saveptr);
     return;
   }
 
@@ -608,9 +702,10 @@ static void updateArmingState(const RcCommand &rc, uint32_t now_ms) {
 // Control step
 // ============================================================
 
-static void sendTelemetry(float dt, const RcCommand &rc, uint32_t cmd_age_ms) {
+static void sendTelemetry(float dt, const RcCommand &rc, uint32_t cmd_age_ms,
+                          const RuntimeConfig &cfg) {
   const uint32_t now_ms = millis();
-  if ((now_ms - g_last_telem_ms) < kTelemPeriodMs) {
+  if ((now_ms - g_last_telem_ms) < cfg.telem_period_ms) {
     return;
   }
   g_last_telem_ms = now_ms;
@@ -653,6 +748,11 @@ static void controlStep(float dt) {
   applyTuningsIfDirty();
   g_last_fs = FS_NONE;
 
+  RuntimeConfig cfg;
+  portENTER_CRITICAL(&g_cfgMux);
+  cfg = g_config;
+  portEXIT_CRITICAL(&g_cfgMux);
+
   RcCommand rc = getRcCommand();
   const uint32_t now_ms = millis();
   const uint32_t cmd_age_ms = (rc.last_ms == 0) ? 0xFFFFFFFFUL : (now_ms - rc.last_ms);
@@ -672,7 +772,7 @@ static void controlStep(float dt) {
   if (kill) {
     disarmNow(kill_reason);
     g_led_mode = LED_FAILSAFE;
-    sendTelemetry(dt, rc, cmd_age_ms);
+    sendTelemetry(dt, rc, cmd_age_ms, cfg);
     return;
   }
 
@@ -680,7 +780,7 @@ static void controlStep(float dt) {
   if (dt <= 0.0f || dt > kDtMaxSec) {
     disarmNow(FS_DT_LIMIT);
     g_led_mode = LED_FAILSAFE;
-    sendTelemetry(dt, rc, cmd_age_ms);
+    sendTelemetry(dt, rc, cmd_age_ms, cfg);
     return;
   }
 
@@ -688,7 +788,7 @@ static void controlStep(float dt) {
   if (!g_mpu.read(&s)) {
     disarmNow(FS_IMU_FAIL);
     g_led_mode = LED_FAILSAFE;
-    sendTelemetry(dt, rc, cmd_age_ms);
+    sendTelemetry(dt, rc, cmd_age_ms, cfg);
     return;
   }
 
@@ -706,7 +806,7 @@ static void controlStep(float dt) {
   if (!isFinitef(roll_deg) || !isFinitef(pitch_deg) || !isFinitef(yaw_deg)) {
     disarmNow(FS_IMU_FAIL);
     g_led_mode = LED_FAILSAFE;
-    sendTelemetry(dt, rc, cmd_age_ms);
+    sendTelemetry(dt, rc, cmd_age_ms, cfg);
     return;
   }
 
@@ -727,17 +827,18 @@ static void controlStep(float dt) {
   g_pitch_deg = use_pitch_deg;
   g_yaw_deg = yaw_deg;
 
-  if (fabsf(g_roll_deg) > kTiltDisarmDeg || fabsf(g_pitch_deg) > kTiltDisarmDeg) {
+  if (fabsf(g_roll_deg) > cfg.tilt_disarm_deg ||
+      fabsf(g_pitch_deg) > cfg.tilt_disarm_deg) {
     disarmNow(FS_TILT_LIMIT);
     g_led_mode = LED_FAILSAFE;
-    sendTelemetry(dt, rc, cmd_age_ms);
+    sendTelemetry(dt, rc, cmd_age_ms, cfg);
     return;
   }
 
-  if (cmd_age_ms > kCmdTimeoutMs) {
+  if (cmd_age_ms > cfg.cmd_timeout_ms) {
     disarmNow(FS_CMD_TIMEOUT);
     g_led_mode = LED_FAILSAFE;
-    sendTelemetry(dt, rc, cmd_age_ms);
+    sendTelemetry(dt, rc, cmd_age_ms, cfg);
     return;
   }
 
@@ -745,7 +846,7 @@ static void controlStep(float dt) {
 
   if (!g_armed) {
     g_led_mode = (rc.arm_request && !g_arm_inhibit) ? LED_ARMING : LED_DISARMED;
-    sendTelemetry(dt, rc, cmd_age_ms);
+    sendTelemetry(dt, rc, cmd_age_ms, cfg);
     return;
   }
 
@@ -753,9 +854,9 @@ static void controlStep(float dt) {
 
   // Setpoints
   const float throttle = clampf(rc.throttle, 0.0f, 1.0f);
-  const float roll_sp_deg = rc.roll * kMaxAngleDeg;
-  const float pitch_sp_deg = rc.pitch * kMaxAngleDeg;
-  const float yaw_rate_sp_dps = rc.yaw * kMaxYawRateDps;
+  const float roll_sp_deg = rc.roll * cfg.max_angle_deg;
+  const float pitch_sp_deg = rc.pitch * cfg.max_angle_deg;
+  const float yaw_rate_sp_dps = rc.yaw * cfg.max_yaw_rate_dps;
 
   // Angle -> rate
   const float roll_rate_sp_dps = g_roll_angle_pid.update(roll_sp_deg - g_roll_deg, dt);
@@ -769,7 +870,7 @@ static void controlStep(float dt) {
   if (!isFinitef(roll_torque) || !isFinitef(pitch_torque) || !isFinitef(yaw_torque)) {
     disarmNow(FS_IMU_FAIL);
     g_led_mode = LED_FAILSAFE;
-    sendTelemetry(dt, rc, cmd_age_ms);
+    sendTelemetry(dt, rc, cmd_age_ms, cfg);
     return;
   }
 
@@ -787,7 +888,7 @@ static void controlStep(float dt) {
 
   motorsWriteAll(m0, m1, m2, m3);
 
-  sendTelemetry(dt, rc, cmd_age_ms);
+  sendTelemetry(dt, rc, cmd_age_ms, cfg);
 }
 
 // ============================================================
