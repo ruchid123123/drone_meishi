@@ -12,6 +12,15 @@ struct RcCommand {
   uint32_t last_ms;
 };
 
+struct ImuSample {
+  float ax_g;
+  float ay_g;
+  float az_g;
+  float gx_dps;
+  float gy_dps;
+  float gz_dps;
+};
+
 struct PidTriplet {
   float kp;
   float ki;
