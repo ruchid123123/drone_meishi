@@ -20,6 +20,13 @@ static const int kI2cSda = 21;
 static const int kI2cScl = 22;
 static const uint8_t kMpuAddr = 0x68;
 
+// IMU axis mapping (sensor -> body)
+// Set these to match your board orientation.
+static const bool kImuSwapXY = true;
+static const bool kImuFlipX = false;
+static const bool kImuFlipY = false;
+static const bool kImuFlipZ = false;
+
 // Motors (X configuration example)
 static const int kMotor0Pin = 12;  // Front Left
 static const int kMotor1Pin = 13;  // Front Right
@@ -75,8 +82,9 @@ static const uint32_t kMaxTelemPeriodMs = 500;
 // IMU filter
 static const float kMadgwickBeta = 0.08f;
 // Disarmed時に姿勢を重力方向へ寄せてドリフトを抑える
-static const float kRelevelAccTolG = 0.15f;
-static const float kRelevelGyroDps = 3.0f;
+static const float kRelevelAccTolG = 0.10f;
+static const float kRelevelGyroDps = 1.5f;
+static const uint32_t kRelevelHoldMs = 400;
 
 // Battery telemetry (任意)
 // 使わないなら -1 のままでOK
@@ -175,6 +183,10 @@ static Tunings g_tunings = {
   {0.010f, 0.0f, 0.0f},     // yaw
 };
 
+static float g_level_roll_offset_deg = 0.0f;
+static float g_level_pitch_offset_deg = 0.0f;
+static float g_level_yaw_offset_deg = 0.0f;
+
 static volatile bool g_tunings_dirty = false;
 static portMUX_TYPE g_cfgMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -210,6 +222,10 @@ static void loadTunings() {
   g_config.telem_period_ms = g_prefs.getUInt("telem_ms", g_config.telem_period_ms);
   clampConfig(&g_config);
 
+  g_level_roll_offset_deg = g_prefs.getFloat("lvl_roll", g_level_roll_offset_deg);
+  g_level_pitch_offset_deg = g_prefs.getFloat("lvl_pitch", g_level_pitch_offset_deg);
+  g_level_yaw_offset_deg = g_prefs.getFloat("lvl_yaw", g_level_yaw_offset_deg);
+
   g_prefs.end();
 }
 
@@ -233,6 +249,10 @@ static void saveTunings() {
   g_prefs.putFloat("tilt_dis", g_config.tilt_disarm_deg);
   g_prefs.putUInt("cmd_to", g_config.cmd_timeout_ms);
   g_prefs.putUInt("telem_ms", g_config.telem_period_ms);
+
+  g_prefs.putFloat("lvl_roll", g_level_roll_offset_deg);
+  g_prefs.putFloat("lvl_pitch", g_level_pitch_offset_deg);
+  g_prefs.putFloat("lvl_yaw", g_level_yaw_offset_deg);
 
   g_prefs.end();
 }
@@ -281,6 +301,25 @@ static volatile uint8_t g_kill_reason = FS_KILL;
 static portMUX_TYPE g_killMux = portMUX_INITIALIZER_UNLOCKED;
 
 static uint32_t g_last_telem_ms = 0;
+static uint32_t g_stationary_start_ms = 0;
+
+enum CalRequest : uint8_t {
+  CAL_REQ_NONE = 0,
+  CAL_REQ_LEVEL = 1,
+  CAL_REQ_GYRO = 2,
+};
+
+enum CalState : uint8_t {
+  CAL_STATE_IDLE = 0,
+  CAL_STATE_LEVEL = 1,
+  CAL_STATE_GYRO = 2,
+  CAL_STATE_FAIL = 3,
+};
+
+static volatile uint8_t g_cal_request = CAL_REQ_NONE;
+static portMUX_TYPE g_calMux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t g_cal_state = CAL_STATE_IDLE;
+static uint32_t g_cal_state_until_ms = 0;
 
 // ============================================================
 // Motor
@@ -352,6 +391,56 @@ static float readVbatt() {
 #endif
 }
 
+static void requestCalibration(uint8_t req) {
+  portENTER_CRITICAL(&g_calMux);
+  if (g_cal_request == CAL_REQ_NONE) {
+    g_cal_request = req;
+  }
+  portEXIT_CRITICAL(&g_calMux);
+}
+
+static uint8_t takeCalibrationRequest() {
+  uint8_t req = CAL_REQ_NONE;
+  portENTER_CRITICAL(&g_calMux);
+  req = g_cal_request;
+  g_cal_request = CAL_REQ_NONE;
+  portEXIT_CRITICAL(&g_calMux);
+  return req;
+}
+
+static void setCalState(uint8_t state, uint32_t hold_ms) {
+  g_cal_state = state;
+  if (hold_ms > 0) {
+    g_cal_state_until_ms = millis() + hold_ms;
+  } else {
+    g_cal_state_until_ms = 0;
+  }
+}
+
+static void updateCalState(uint32_t now_ms) {
+  if (g_cal_state_until_ms == 0) {
+    return;
+  }
+  if ((int32_t)(now_ms - g_cal_state_until_ms) >= 0) {
+    g_cal_state = CAL_STATE_IDLE;
+    g_cal_state_until_ms = 0;
+  }
+}
+
+static const char *calStateLabel(uint8_t state) {
+  switch (state) {
+    case CAL_STATE_LEVEL:
+      return "LEVEL";
+    case CAL_STATE_GYRO:
+      return "GYRO";
+    case CAL_STATE_FAIL:
+      return "FAIL";
+    case CAL_STATE_IDLE:
+    default:
+      return "IDLE";
+  }
+}
+
 // ============================================================
 // Apply tunings to PID objects
 // ============================================================
@@ -402,6 +491,7 @@ static void applyTuningsIfDirty() {
 // - CFG,KEY,VALUE (MAX_ANGLE, MAX_YAW_RATE, TILT_DISARM, CMD_TIMEOUT, TELEM_MS)
 // - GET
 // - SAVE
+// - CAL,LEVEL|GYRO
 // - K   (kill/disarm)
 // ============================================================
 
@@ -432,6 +522,37 @@ static void sendCfgToClient(AsyncWebSocketClient *client) {
     cfg.max_angle_deg, cfg.max_yaw_rate_dps, cfg.tilt_disarm_deg,
     (unsigned long)cfg.cmd_timeout_ms, (unsigned long)cfg.telem_period_ms
   );
+
+  client->text(buf);
+}
+
+static void sendAck(AsyncWebSocketClient *client, const char *op, const char *tag,
+                    bool ok, const char *msg) {
+  if (client == nullptr || op == nullptr) {
+    return;
+  }
+
+  const bool has_tag = (tag != nullptr && tag[0] != '\0');
+  const bool has_msg = (msg != nullptr && msg[0] != '\0');
+  char buf[160];
+
+  if (has_tag && has_msg) {
+    snprintf(buf, sizeof(buf),
+             "{\"type\":\"ack\",\"op\":\"%s\",\"tag\":\"%s\",\"ok\":%d,\"msg\":\"%s\"}",
+             op, tag, ok ? 1 : 0, msg);
+  } else if (has_tag) {
+    snprintf(buf, sizeof(buf),
+             "{\"type\":\"ack\",\"op\":\"%s\",\"tag\":\"%s\",\"ok\":%d}",
+             op, tag, ok ? 1 : 0);
+  } else if (has_msg) {
+    snprintf(buf, sizeof(buf),
+             "{\"type\":\"ack\",\"op\":\"%s\",\"ok\":%d,\"msg\":\"%s\"}",
+             op, ok ? 1 : 0, msg);
+  } else {
+    snprintf(buf, sizeof(buf),
+             "{\"type\":\"ack\",\"op\":\"%s\",\"ok\":%d}",
+             op, ok ? 1 : 0);
+  }
 
   client->text(buf);
 }
@@ -522,12 +643,14 @@ static void handleWsText(AsyncWebSocketClient *client, char *msg) {
   // GET
   if (strcmp(msg, "GET") == 0) {
     sendCfgToClient(client);
+    sendAck(client, "GET", nullptr, true, nullptr);
     return;
   }
 
   // SAVE
   if (strcmp(msg, "SAVE") == 0) {
     saveTunings();
+    sendAck(client, "SAVE", nullptr, true, nullptr);
     return;
   }
 
@@ -545,6 +668,30 @@ static void handleWsText(AsyncWebSocketClient *client, char *msg) {
 
   if (strcmp(head, "CFG") == 0) {
     handleCfgMsg(saveptr);
+    return;
+  }
+
+  if (strcmp(head, "CAL") == 0) {
+    const char *tag = strtok_r(nullptr, ",", &saveptr);
+    if (tag == nullptr) {
+      sendAck(client, "CAL", nullptr, false, "BAD");
+      return;
+    }
+    if (g_armed) {
+      sendAck(client, "CAL", tag, false, "ARMED");
+      return;
+    }
+    if (strcmp(tag, "LEVEL") == 0) {
+      requestCalibration(CAL_REQ_LEVEL);
+      sendAck(client, "CAL", tag, true, "QUEUED");
+      return;
+    }
+    if (strcmp(tag, "GYRO") == 0) {
+      requestCalibration(CAL_REQ_GYRO);
+      sendAck(client, "CAL", tag, true, "QUEUED");
+      return;
+    }
+    sendAck(client, "CAL", tag, false, "BAD");
     return;
   }
 
@@ -719,7 +866,9 @@ static void sendTelemetry(float dt, const RcCommand &rc, uint32_t cmd_age_ms,
     snprintf(vbatt_buf, sizeof(vbatt_buf), "null");
   }
 
-  char buf[320];
+  const char *cal = calStateLabel(g_cal_state);
+
+  char buf[360];
   snprintf(
     buf,
     sizeof(buf),
@@ -730,7 +879,8 @@ static void sendTelemetry(float dt, const RcCommand &rc, uint32_t cmd_age_ms,
     "\"cmd_age\":%lu,"
     "\"m0\":%.3f,\"m1\":%.3f,\"m2\":%.3f,\"m3\":%.3f,"
     "\"vbatt\":%s,"
-    "\"fs\":%u}",
+    "\"fs\":%u,"
+    "\"cal\":\"%s\"}",
     (unsigned long)now_ms,
     g_armed ? 1 : 0,
     g_roll_deg, g_pitch_deg, g_yaw_deg,
@@ -738,7 +888,8 @@ static void sendTelemetry(float dt, const RcCommand &rc, uint32_t cmd_age_ms,
     (unsigned long)cmd_age_ms,
     g_motor_last[0], g_motor_last[1], g_motor_last[2], g_motor_last[3],
     vbatt_buf,
-    (unsigned int)g_last_fs
+    (unsigned int)g_last_fs,
+    cal
   );
 
   g_ws.textAll(buf);
@@ -755,6 +906,7 @@ static void controlStep(float dt) {
 
   RcCommand rc = getRcCommand();
   const uint32_t now_ms = millis();
+  updateCalState(now_ms);
   const uint32_t cmd_age_ms = (rc.last_ms == 0) ? 0xFFFFFFFFUL : (now_ms - rc.last_ms);
 
   // Check kill request
@@ -798,34 +950,60 @@ static void controlStep(float dt) {
   const float gz_rads = s.gz_dps * (float)M_PI / 180.0f;
 
   g_ahrs.update(gx_rads, gy_rads, gz_rads, s.ax_g, s.ay_g, s.az_g, dt);
-  float roll_deg = 0.0f;
-  float pitch_deg = 0.0f;
-  float yaw_deg = 0.0f;
-  g_ahrs.getEulerDeg(&roll_deg, &pitch_deg, &yaw_deg);
+  float roll_raw_deg = 0.0f;
+  float pitch_raw_deg = 0.0f;
+  float yaw_raw_deg = 0.0f;
+  g_ahrs.getEulerDeg(&roll_raw_deg, &pitch_raw_deg, &yaw_raw_deg);
 
-  if (!isFinitef(roll_deg) || !isFinitef(pitch_deg) || !isFinitef(yaw_deg)) {
+  if (!isFinitef(roll_raw_deg) || !isFinitef(pitch_raw_deg) || !isFinitef(yaw_raw_deg)) {
     disarmNow(FS_IMU_FAIL);
     g_led_mode = LED_FAILSAFE;
     sendTelemetry(dt, rc, cmd_age_ms, cfg);
     return;
   }
 
-  float use_roll_deg = roll_deg;
-  float use_pitch_deg = pitch_deg;
-  if (!g_armed && isImuStationary(s)) {
+  const bool stationary_now = isImuStationary(s);
+  if (!g_armed && stationary_now) {
+    if (g_stationary_start_ms == 0) {
+      g_stationary_start_ms = now_ms;
+    }
+  } else {
+    g_stationary_start_ms = 0;
+  }
+
+  float use_roll_raw = roll_raw_deg;
+  float use_pitch_raw = pitch_raw_deg;
+  if (!g_armed && g_stationary_start_ms != 0 &&
+      (now_ms - g_stationary_start_ms) >= kRelevelHoldMs) {
     float acc_roll_deg = 0.0f;
     float acc_pitch_deg = 0.0f;
     accelToRollPitchDeg(s, &acc_roll_deg, &acc_pitch_deg);
     if (isFinitef(acc_roll_deg) && isFinitef(acc_pitch_deg)) {
-      use_roll_deg = acc_roll_deg;
-      use_pitch_deg = acc_pitch_deg;
-      g_ahrs.setEulerDeg(use_roll_deg, use_pitch_deg, yaw_deg);
+      use_roll_raw = acc_roll_deg;
+      use_pitch_raw = acc_pitch_deg;
+      g_ahrs.setEulerDeg(use_roll_raw, use_pitch_raw, yaw_raw_deg);
     }
   }
 
-  g_roll_deg = use_roll_deg;
-  g_pitch_deg = use_pitch_deg;
-  g_yaw_deg = yaw_deg;
+  const uint8_t cal_req = takeCalibrationRequest();
+  if (cal_req != CAL_REQ_NONE) {
+    if (g_armed) {
+      setCalState(CAL_STATE_FAIL, 1500);
+    } else if (cal_req == CAL_REQ_LEVEL) {
+      g_level_roll_offset_deg = use_roll_raw;
+      g_level_pitch_offset_deg = use_pitch_raw;
+      saveTunings();
+      setCalState(CAL_STATE_LEVEL, 1500);
+    } else if (cal_req == CAL_REQ_GYRO) {
+      motorsWriteAll(0.0f, 0.0f, 0.0f, 0.0f);
+      g_mpu.calibrateGyro(500, 2);
+      setCalState(CAL_STATE_GYRO, 1500);
+    }
+  }
+
+  g_roll_deg = use_roll_raw - g_level_roll_offset_deg;
+  g_pitch_deg = use_pitch_raw - g_level_pitch_offset_deg;
+  g_yaw_deg = yaw_raw_deg - g_level_yaw_offset_deg;
 
   if (fabsf(g_roll_deg) > cfg.tilt_disarm_deg ||
       fabsf(g_pitch_deg) > cfg.tilt_disarm_deg) {

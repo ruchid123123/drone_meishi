@@ -216,13 +216,43 @@ class Mpu6050 {
     const float a_scale = 8.0f / 32768.0f;
     const float g_scale = 2000.0f / 32768.0f;
 
-    out->ax_g = ax * a_scale;
-    out->ay_g = ay * a_scale;
-    out->az_g = az * a_scale;
+    float ax_g = ax * a_scale;
+    float ay_g = ay * a_scale;
+    float az_g = az * a_scale;
 
-    out->gx_dps = gx * g_scale - gyro_bias_x_;
-    out->gy_dps = gy * g_scale - gyro_bias_y_;
-    out->gz_dps = gz * g_scale - gyro_bias_z_;
+    float gx_dps = gx * g_scale - gyro_bias_x_;
+    float gy_dps = gy * g_scale - gyro_bias_y_;
+    float gz_dps = gz * g_scale - gyro_bias_z_;
+
+    // Apply board orientation mapping (sensor -> body).
+    if (kImuSwapXY) {
+      const float t_a = ax_g;
+      ax_g = ay_g;
+      ay_g = t_a;
+      const float t_g = gx_dps;
+      gx_dps = gy_dps;
+      gy_dps = t_g;
+    }
+    if (kImuFlipX) {
+      ax_g = -ax_g;
+      gx_dps = -gx_dps;
+    }
+    if (kImuFlipY) {
+      ay_g = -ay_g;
+      gy_dps = -gy_dps;
+    }
+    if (kImuFlipZ) {
+      az_g = -az_g;
+      gz_dps = -gz_dps;
+    }
+
+    out->ax_g = ax_g;
+    out->ay_g = ay_g;
+    out->az_g = az_g;
+
+    out->gx_dps = gx_dps;
+    out->gy_dps = gy_dps;
+    out->gz_dps = gz_dps;
     return true;
   }
 
@@ -289,4 +319,3 @@ static bool isImuStationary(const ImuSample &s) {
   }
   return true;
 }
-

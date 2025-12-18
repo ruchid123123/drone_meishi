@@ -348,6 +348,12 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
           <span class="muted" id="attNums">-</span>
         </div>
         <canvas id="attCanvas"></canvas>
+        <div class="row">
+          <button id="levelBtn">LEVEL</button>
+          <button id="gyroCalBtn">GYRO CAL</button>
+          <span class="muted" id="calState">CAL: -</span>
+        </div>
+        <small class="muted">Keep still on a flat surface.</small>
         <div class="kv">
           <div>Roll</div><div id="attRoll">-</div>
           <div>Pitch</div><div id="attPitch">-</div>
@@ -360,6 +366,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
           <button id="syncBtn">GET</button>
           <button id="saveBtn">SAVE</button>
           <span class="muted">PID + config</span>
+          <span class="muted" id="actionStatus">-</span>
         </div>
 
         <div class="section">
@@ -428,6 +435,10 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   const attYawLabel = document.getElementById('attYaw');
   const attCanvas = document.getElementById('attCanvas');
   const attCtx = attCanvas ? attCanvas.getContext('2d') : null;
+  const levelBtn = document.getElementById('levelBtn');
+  const gyroCalBtn = document.getElementById('gyroCalBtn');
+  const calState = document.getElementById('calState');
+  const actionStatus = document.getElementById('actionStatus');
 
   const modeControl = document.getElementById('modeControl');
   const modeSettings = document.getElementById('modeSettings');
@@ -474,6 +485,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   let armReq = 0;
 
   let lastAtt = { roll: 0, pitch: 0, yaw: 0 };
+  let statusTimer = null;
 
   const fsMap = {
     0: 'NONE',
@@ -488,6 +500,21 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
 
   function clamp(v, vmin, vmax) {
     return Math.max(vmin, Math.min(vmax, v));
+  }
+
+  function setStatus(text, holdMs = 2000) {
+    if (!actionStatus) return;
+    actionStatus.textContent = text;
+    if (statusTimer) {
+      clearTimeout(statusTimer);
+      statusTimer = null;
+    }
+    if (holdMs > 0) {
+      statusTimer = setTimeout(() => {
+        actionStatus.textContent = '-';
+        statusTimer = null;
+      }, holdMs);
+    }
   }
 
   function joyMaxR(areaEl) {
@@ -643,6 +670,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
           if (attRollLabel) attRollLabel.textContent = rollTxt;
           if (attPitchLabel) attPitchLabel.textContent = pitchTxt;
           if (attYawLabel) attYawLabel.textContent = yawTxt;
+          if (calState && obj.cal) calState.textContent = `CAL: ${obj.cal}`;
 
           dtHzLabel.textContent = `${obj.dt_ms.toFixed(2)} ms / ${obj.loop_hz.toFixed(0)} Hz`;
           cmdAgeLabel.textContent = `${obj.cmd_age} ms`;
@@ -653,6 +681,16 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
           if (Number.isFinite(rollDeg) && Number.isFinite(pitchDeg) && Number.isFinite(yawDeg)) {
             drawAttitude(rollDeg, pitchDeg, yawDeg);
           }
+        } else if (obj.type === 'ack') {
+          const op = String(obj.op || '');
+          const tag = obj.tag ? String(obj.tag) : '';
+          const ok = obj.ok ? true : false;
+          const msg = obj.msg ? String(obj.msg) : '';
+          let text = op || 'ACK';
+          if (tag) text += ` ${tag}`;
+          text += ok ? ' OK' : ' FAIL';
+          if (msg) text += ` (${msg})`;
+          setStatus(text, ok ? 2000 : 3000);
         } else if (obj.type === 'cfg') {
           if (aKp) aKp.value = obj.angle.kp;
           if (aKi) aKi.value = obj.angle.ki;
@@ -670,6 +708,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
             if (cmdTimeout) cmdTimeout.value = obj.limits.cmd_timeout;
             if (telemMs) telemMs.value = obj.limits.telem_ms;
           }
+          setStatus('CFG updated', 2000);
         }
       } catch (e) {
         // ignore
@@ -714,6 +753,18 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     });
   }
 
+  function sendWs(text, statusText) {
+    if (!ws || ws.readyState !== 1) {
+      setStatus('WS not open', 2000);
+      return false;
+    }
+    if (statusText) {
+      setStatus(statusText, 1500);
+    }
+    ws.send(text);
+    return true;
+  }
+
   function sendPid(tag, kp, ki, kd) {
     if (!ws || ws.readyState !== 1) return;
     ws.send(`PID,${tag},${kp},${ki},${kd}`);
@@ -736,12 +787,23 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   }
   if (syncBtn) {
     syncBtn.addEventListener('click', () => {
-      if (ws && ws.readyState === 1) ws.send('GET');
+      sendWs('GET', 'GET sent');
     });
   }
   if (saveBtn) {
     saveBtn.addEventListener('click', () => {
-      if (ws && ws.readyState === 1) ws.send('SAVE');
+      sendWs('SAVE', 'SAVE sent');
+    });
+  }
+
+  if (levelBtn) {
+    levelBtn.addEventListener('click', () => {
+      sendWs('CAL,LEVEL', 'CAL LEVEL sent');
+    });
+  }
+  if (gyroCalBtn) {
+    gyroCalBtn.addEventListener('click', () => {
+      sendWs('CAL,GYRO', 'CAL GYRO sent');
     });
   }
 
