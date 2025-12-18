@@ -368,6 +368,10 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
           <span class="muted">PID + config</span>
           <span class="muted" id="actionStatus">-</span>
         </div>
+        <div class="row">
+          <b>Status</b>
+          <span id="statusMsg">-</span>
+        </div>
 
         <div class="section">
           <b>Angle (Roll/Pitch)</b>
@@ -439,6 +443,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   const gyroCalBtn = document.getElementById('gyroCalBtn');
   const calState = document.getElementById('calState');
   const actionStatus = document.getElementById('actionStatus');
+  const statusMsg = document.getElementById('statusMsg');
 
   const modeControl = document.getElementById('modeControl');
   const modeSettings = document.getElementById('modeSettings');
@@ -495,7 +500,8 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     4: 'TILT_LIMIT',
     5: 'DT_LIMIT',
     6: 'KILL',
-    7: 'MANUAL'
+    7: 'MANUAL',
+    8: 'MOTOR_FAIL'
   };
 
   function clamp(v, vmin, vmax) {
@@ -677,6 +683,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
           motLabel.textContent = `${obj.m0.toFixed(2)} ${obj.m1.toFixed(2)} ${obj.m2.toFixed(2)} ${obj.m3.toFixed(2)}`;
           vbattLabel.textContent = (Number.isFinite(obj.vbatt) ? `${obj.vbatt.toFixed(2)} V` : '-');
           fsLabel.textContent = fsMap[obj.fs] || String(obj.fs);
+          if (statusMsg) statusMsg.textContent = obj.msg ? String(obj.msg) : '-';
 
           if (Number.isFinite(rollDeg) && Number.isFinite(pitchDeg) && Number.isFinite(yawDeg)) {
             drawAttitude(rollDeg, pitchDeg, yawDeg);
