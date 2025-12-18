@@ -996,17 +996,17 @@ static void controlStep(float dt) {
 
   float use_roll_raw = roll_raw_deg;
   float use_pitch_raw = pitch_raw_deg;
-  if (!g_armed && g_stationary_start_ms != 0 &&
-      (now_ms - g_stationary_start_ms) >= kRelevelHoldMs) {
-    float acc_roll_deg = 0.0f;
-    float acc_pitch_deg = 0.0f;
-    accelToRollPitchDeg(s, &acc_roll_deg, &acc_pitch_deg);
-    if (isFinitef(acc_roll_deg) && isFinitef(acc_pitch_deg)) {
-      use_roll_raw = acc_roll_deg;
-      use_pitch_raw = acc_pitch_deg;
-      g_ahrs.setEulerDeg(use_roll_raw, use_pitch_raw, yaw_raw_deg);
-    }
-  }
+//   if (!g_armed && g_stationary_start_ms != 0 &&
+//       (now_ms - g_stationary_start_ms) >= kRelevelHoldMs) {
+//     float acc_roll_deg = 0.0f;
+//     float acc_pitch_deg = 0.0f;
+//     accelToRollPitchDeg(s, &acc_roll_deg, &acc_pitch_deg);
+//     if (isFinitef(acc_roll_deg) && isFinitef(acc_pitch_deg)) {
+//       use_roll_raw = acc_roll_deg;
+//       use_pitch_raw = acc_pitch_deg;
+//       g_ahrs.setEulerDeg(use_roll_raw, use_pitch_raw, yaw_raw_deg);
+//     }
+//   }
 
   const uint8_t cal_req = takeCalibrationRequest();
   if (cal_req != CAL_REQ_NONE) {

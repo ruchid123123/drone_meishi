@@ -48,10 +48,10 @@ class MadgwickImu {
     const float j_32 = 2.0f * j_14or21;
     const float j_33 = 2.0f * j_11or24;
 
-    float s0 = j_14or21 * f2 - j_11or24 * f1;
-    float s1 = j_12or23 * f1 + j_13or22 * f2 - j_32 * f3;
-    float s2 = j_12or23 * f2 - j_33 * f3 - j_13or22 * f1;
-    float s3 = j_14or21 * f1 + j_11or24 * f2;
+    float s0 = j_11or24 * f1 + j_14or21 * f2;
+    float s1 = j_12or23 * f1 - j_13or22 * f2 - j_32 * f3;
+    float s2 = j_13or22 * f1 + j_12or23 * f2 + j_33 * f3;
+    float s3 = j_14or21 * f1 - j_11or24 * f2;
 
     const float norm_s = sqrtf(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3);
     if (norm_s > 1e-6f) {
