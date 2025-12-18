@@ -23,8 +23,8 @@ static const uint8_t kMpuAddr = 0x68;
 // IMU axis mapping (sensor -> body)
 // Set these to match your board orientation.
 static const bool kImuSwapXY = true;
-static const bool kImuFlipX = false;
-static const bool kImuFlipY = false;
+static const bool kImuFlipX = true;   // Right roll -> positive
+static const bool kImuFlipY = true;   // Pitch up -> positive
 static const bool kImuFlipZ = false;
 
 // Motors (X configuration example)
@@ -80,22 +80,41 @@ static const uint32_t kMinTelemPeriodMs = 20;
 static const uint32_t kMaxTelemPeriodMs = 500;
 
 // IMU filter
-static const float kMadgwickBeta = 0.15f;
+static const float kMadgwickBeta = 0.08f;
 static const float kMadgwickBetaMin = 0.02f;
-static const float kMadgwickBetaMax = 0.15f;
+static const float kMadgwickBetaMax = 0.14f;
+
+// Betaflight-style Mahony (DCM) gains.
+// - Kp: proportional correction strength (rad/s per unit error)
+// - Ki: integral correction strength (rad/s^2 per unit error)
+// Start with Ki=0 and tune Kp first.
+static const float kMahonyKp = 2.2f;
+static const float kMahonyKi = 0.0f;
+static const float kMahonyIntegralLimitRads = 0.35f;  // clamp for bias estimate (rad/s)
+static const float kMahonySpinLimitDps = 180.0f;      // disable integral update above this rate
+
 static const float kAccTrustHi = 0.08f;  // |norm-1| <= this -> full trust
 static const float kAccTrustLo = 0.35f;  // |norm-1| >= this -> no trust
-enum FilterMode : uint8_t { FILTER_MADGWICK = 0, FILTER_COMP = 1 };
-static const FilterMode kFilterMode = FILTER_MADGWICK;  // 切替: Madgwick / コンプリメンタリ
+
+enum FilterMode : uint8_t {
+  FILTER_MADGWICK = 0,
+  FILTER_MAHONY = 1,
+  FILTER_COMP = 2,
+};
+
+// Default AHRS mode. For Angle flight, Mahony is usually a good starting point.
+static const FilterMode kFilterMode = FILTER_MAHONY;
+
 static const float kCompAlpha = 0.98f;  // complementary blend (gyro vs acc)
 
 static const float kRelevelAccTolG = 0.10f;
 static const float kRelevelGyroDps = 1.5f;
 static const uint32_t kRelevelHoldMs = 400;
 
+// Battery telemetry
 
-static const int kVbattAdcPin = -1;         // Example: 34
-static const float kVbattDividerRatio = 2.0f;  // Divider ratio (VBAT = Vadc * ratio)
+static const int kVbattAdcPin = -1;         // e.g. 34
+static const float kVbattDividerRatio = 2.0f;  // voltage divider ratio (VBAT = Vadc * ratio)
 
 // ============================================================
 // Utilities
@@ -196,6 +215,9 @@ static float g_level_yaw_offset_deg = 0.0f;
 static volatile bool g_tunings_dirty = false;
 static portMUX_TYPE g_cfgMux = portMUX_INITIALIZER_UNLOCKED;
 
+// Active AHRS mode (switchable). Protected by g_cfgMux.
+static FilterMode g_filter_mode = kFilterMode;
+
 static Preferences g_prefs;
 
 static void clampConfig(RuntimeConfig *cfg) {
@@ -232,6 +254,12 @@ static void loadTunings() {
   g_level_pitch_offset_deg = g_prefs.getFloat("lvl_pitch", g_level_pitch_offset_deg);
   g_level_yaw_offset_deg = g_prefs.getFloat("lvl_yaw", g_level_yaw_offset_deg);
 
+  // IMU/AHRS filter mode (0:Madgwick, 1:Mahony, 2:Complementary)
+  const uint32_t imu_filt = g_prefs.getUInt("imu_filt", (uint32_t)g_filter_mode);
+  if (imu_filt <= (uint32_t)FILTER_COMP) {
+    g_filter_mode = (FilterMode)imu_filt;
+  }
+
   g_prefs.end();
 }
 
@@ -260,6 +288,8 @@ static void saveTunings() {
   g_prefs.putFloat("lvl_pitch", g_level_pitch_offset_deg);
   g_prefs.putFloat("lvl_yaw", g_level_yaw_offset_deg);
 
+  g_prefs.putUInt("imu_filt", (uint32_t)g_filter_mode);
+
   g_prefs.end();
 }
 
@@ -271,7 +301,10 @@ static AsyncWebServer g_server(80);
 static AsyncWebSocket g_ws("/ws");
 
 static Mpu6050 g_mpu;
-static MadgwickImu g_ahrs;
+static MadgwickImu g_ahrs_madgwick;
+static MahonyImu g_ahrs_mahony;
+
+static uint32_t g_stationary_start_ms = 0;
 
 static Pid g_roll_angle_pid;
 static Pid g_pitch_angle_pid;
@@ -307,7 +340,6 @@ static volatile uint8_t g_kill_reason = FS_KILL;
 static portMUX_TYPE g_killMux = portMUX_INITIALIZER_UNLOCKED;
 
 static uint32_t g_last_telem_ms = 0;
-static uint32_t g_stationary_start_ms = 0;
 static bool g_comp_init = false;
 static float g_comp_roll_deg = 0.0f;
 static float g_comp_pitch_deg = 0.0f;
@@ -487,7 +519,6 @@ static void applyTuningsIfDirty() {
 
   if (dirty) {
     applyTunings(t);
-    // 変更時に積分などが暴れないようPIDをリセット
     resetAllPid();
   }
 }
@@ -512,20 +543,23 @@ static void sendCfgToClient(AsyncWebSocketClient *client) {
 
   Tunings t;
   RuntimeConfig cfg;
+  FilterMode imu = kFilterMode;
   portENTER_CRITICAL(&g_cfgMux);
   t = g_tunings;
   cfg = g_config;
+  imu = g_filter_mode;
   portEXIT_CRITICAL(&g_cfgMux);
 
-  char buf[384];
+  char buf[420];
   snprintf(
     buf,
     sizeof(buf),
-    "{\"type\":\"cfg\",\"angle\":{\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f},"
+    "{\"type\":\"cfg\",\"imu_filter\":%u,\"angle\":{\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f},"
     "\"rate\":{\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f},"
     "\"yaw\":{\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f},"
     "\"limits\":{\"max_angle\":%.2f,\"max_yaw_rate\":%.2f,\"tilt_disarm\":%.2f,"
     "\"cmd_timeout\":%lu,\"telem_ms\":%lu}}",
+    (unsigned int)imu,
     t.angle.kp, t.angle.ki, t.angle.kd,
     t.rate.kp, t.rate.ki, t.rate.kd,
     t.yaw.kp, t.yaw.ki, t.yaw.kd,
@@ -635,6 +669,11 @@ static void handleCfgMsg(char *saveptr) {
     g_config.cmd_timeout_ms = clampu32(vu, kMinCmdTimeoutMs, kMaxCmdTimeoutMs);
   } else if (strcmp(key, "TELEM_MS") == 0) {
     g_config.telem_period_ms = clampu32(vu, kMinTelemPeriodMs, kMaxTelemPeriodMs);
+  } else if (strcmp(key, "IMU_FILTER") == 0) {
+    // 0: Madgwick, 1: Mahony, 2: Complementary
+    if (!g_armed && vu <= (uint32_t)FILTER_COMP) {
+      g_filter_mode = (FilterMode)vu;
+    }
   }
   portEXIT_CRITICAL(&g_cfgMux);
 }
@@ -811,7 +850,6 @@ static bool canArm(const RcCommand &rc) {
       fabsf(rc.yaw) > kStickCenterMax) {
     return false;
   }
-
   if (fabsf(g_roll_deg) > 45.0f || fabsf(g_pitch_deg) > 45.0f) {
     return false;
   }
@@ -819,7 +857,7 @@ static bool canArm(const RcCommand &rc) {
 }
 
 static void updateArmingState(const RcCommand &rc, uint32_t now_ms) {
-
+  // kill latch release: arm_request OFF + throttle low
   if (!rc.arm_request && rc.throttle <= kArmThrottleMax) {
     g_arm_inhibit = false;
   }
@@ -909,8 +947,10 @@ static void controlStep(float dt) {
   g_last_fs = FS_NONE;
 
   RuntimeConfig cfg;
+  FilterMode imu_mode = kFilterMode;
   portENTER_CRITICAL(&g_cfgMux);
   cfg = g_config;
+  imu_mode = g_filter_mode;
   portEXIT_CRITICAL(&g_cfgMux);
 
   RcCommand rc = getRcCommand();
@@ -953,30 +993,94 @@ static void controlStep(float dt) {
     return;
   }
 
-  // NOTE: IMU軸が機体軸と違う場合、ここで符号/入れ替えが必要
   const float gx_rads = s.gx_dps * (float)M_PI / 180.0f;
   const float gy_rads = s.gy_dps * (float)M_PI / 180.0f;
   const float gz_rads = s.gz_dps * (float)M_PI / 180.0f;
 
-  // 動的に加速度の信頼度に応じてベータを調整し、ドリフトを抑える
-  float beta_use = kMadgwickBeta;
+  // Accelerometer trust (0..1). Used for gating / adaptive correction.
+  float acc_trust = 0.0f;
   const float acc_norm = sqrtf(s.ax_g * s.ax_g + s.ay_g * s.ay_g + s.az_g * s.az_g);
   if (isFinitef(acc_norm)) {
     const float dev = fabsf(acc_norm - 1.0f);
     if (kAccTrustLo > kAccTrustHi) {
-      float w = (kAccTrustLo - dev) / (kAccTrustLo - kAccTrustHi);  // dev<=Hi ->1, dev>=Lo ->0
-      w = clampf(w, 0.0f, 1.0f);
-      beta_use = kMadgwickBetaMin + w * (kMadgwickBetaMax - kMadgwickBetaMin);
+      acc_trust = (kAccTrustLo - dev) / (kAccTrustLo - kAccTrustHi);  // dev<=Hi ->1, dev>=Lo ->0
+      acc_trust = clampf(acc_trust, 0.0f, 1.0f);
+    } else {
+      acc_trust = (dev <= kAccTrustHi) ? 1.0f : 0.0f;
     }
   }
-  beta_use = clampf(beta_use, kMadgwickBetaMin, kMadgwickBetaMax);
-  g_ahrs.setBeta(beta_use);
 
-  g_ahrs.update(gx_rads, gy_rads, gz_rads, s.ax_g, s.ay_g, s.az_g, dt);
+  // Apply filter mode switch (keeps attitude continuous).
+  static FilterMode active_mode = kFilterMode;
+  if (imu_mode != active_mode) {
+    float r0 = 0.0f;
+    float p0 = 0.0f;
+    float y0 = 0.0f;
+
+    if (active_mode == FILTER_MADGWICK) {
+      g_ahrs_madgwick.getEulerDeg(&r0, &p0, &y0);
+    } else if (active_mode == FILTER_MAHONY) {
+      g_ahrs_mahony.getEulerDeg(&r0, &p0, &y0);
+    } else {
+      r0 = g_comp_roll_deg;
+      p0 = g_comp_pitch_deg;
+      y0 = g_comp_yaw_deg;
+    }
+
+    g_ahrs_madgwick.setEulerDeg(r0, p0, y0);
+    g_ahrs_mahony.reset();
+    g_ahrs_mahony.setEulerDeg(r0, p0, y0);
+
+    g_comp_init = true;
+    g_comp_roll_deg = r0;
+    g_comp_pitch_deg = p0;
+    g_comp_yaw_deg = y0;
+
+    active_mode = imu_mode;
+  }
+
   float roll_raw_deg = 0.0f;
   float pitch_raw_deg = 0.0f;
   float yaw_raw_deg = 0.0f;
-  g_ahrs.getEulerDeg(&roll_raw_deg, &pitch_raw_deg, &yaw_raw_deg);
+
+  if (active_mode == FILTER_MADGWICK) {
+    // Adaptive beta based on accel trust.
+    float beta_use = kMadgwickBetaMin + acc_trust * (kMadgwickBetaMax - kMadgwickBetaMin);
+    beta_use = clampf(beta_use, kMadgwickBetaMin, kMadgwickBetaMax);
+    g_ahrs_madgwick.setBeta(beta_use);
+
+    g_ahrs_madgwick.update(gx_rads, gy_rads, gz_rads, s.ax_g, s.ay_g, s.az_g, dt);
+    g_ahrs_madgwick.getEulerDeg(&roll_raw_deg, &pitch_raw_deg, &yaw_raw_deg);
+  } else if (active_mode == FILTER_MAHONY) {
+    g_ahrs_mahony.update(gx_rads, gy_rads, gz_rads, s.ax_g, s.ay_g, s.az_g, dt, acc_trust);
+    g_ahrs_mahony.getEulerDeg(&roll_raw_deg, &pitch_raw_deg, &yaw_raw_deg);
+  } else {
+    // Simple complementary filter (Euler).
+    float acc_roll_deg = 0.0f;
+    float acc_pitch_deg = 0.0f;
+    accelToRollPitchDeg(s, &acc_roll_deg, &acc_pitch_deg);
+
+    if (!g_comp_init || !isFinitef(g_comp_roll_deg) || !isFinitef(g_comp_pitch_deg) || !isFinitef(g_comp_yaw_deg)) {
+      g_comp_roll_deg = acc_roll_deg;
+      g_comp_pitch_deg = acc_pitch_deg;
+      g_comp_yaw_deg = 0.0f;
+      g_comp_init = true;
+    } else {
+      g_comp_roll_deg += s.gx_dps * dt;
+      g_comp_pitch_deg += s.gy_dps * dt;
+      g_comp_yaw_deg += s.gz_dps * dt;
+
+      // Reduce accel influence when it is not trustworthy.
+      const float alpha_use = clampf(1.0f - (1.0f - kCompAlpha) * acc_trust, kCompAlpha, 1.0f);
+      g_comp_roll_deg = alpha_use * g_comp_roll_deg + (1.0f - alpha_use) * acc_roll_deg;
+      g_comp_pitch_deg = alpha_use * g_comp_pitch_deg + (1.0f - alpha_use) * acc_pitch_deg;
+    }
+
+    roll_raw_deg = g_comp_roll_deg;
+    pitch_raw_deg = g_comp_pitch_deg;
+    yaw_raw_deg = g_comp_yaw_deg;
+  }
+
 
   if (!isFinitef(roll_raw_deg) || !isFinitef(pitch_raw_deg) || !isFinitef(yaw_raw_deg)) {
     disarmNow(FS_IMU_FAIL);
@@ -996,17 +1100,23 @@ static void controlStep(float dt) {
 
   float use_roll_raw = roll_raw_deg;
   float use_pitch_raw = pitch_raw_deg;
-//   if (!g_armed && g_stationary_start_ms != 0 &&
-//       (now_ms - g_stationary_start_ms) >= kRelevelHoldMs) {
-//     float acc_roll_deg = 0.0f;
-//     float acc_pitch_deg = 0.0f;
-//     accelToRollPitchDeg(s, &acc_roll_deg, &acc_pitch_deg);
-//     if (isFinitef(acc_roll_deg) && isFinitef(acc_pitch_deg)) {
-//       use_roll_raw = acc_roll_deg;
-//       use_pitch_raw = acc_pitch_deg;
-//       g_ahrs.setEulerDeg(use_roll_raw, use_pitch_raw, yaw_raw_deg);
-//     }
-//   }
+  if (!g_armed && g_stationary_start_ms != 0 &&
+      (now_ms - g_stationary_start_ms) >= kRelevelHoldMs) {
+    float acc_roll_deg = 0.0f;
+    float acc_pitch_deg = 0.0f;
+    accelToRollPitchDeg(s, &acc_roll_deg, &acc_pitch_deg);
+    if (isFinitef(acc_roll_deg) && isFinitef(acc_pitch_deg)) {
+      use_roll_raw = acc_roll_deg;
+      use_pitch_raw = acc_pitch_deg;
+      g_ahrs_madgwick.setEulerDeg(use_roll_raw, use_pitch_raw, yaw_raw_deg);
+      g_ahrs_mahony.reset();
+      g_ahrs_mahony.setEulerDeg(use_roll_raw, use_pitch_raw, yaw_raw_deg);
+      g_comp_init = true;
+      g_comp_roll_deg = use_roll_raw;
+      g_comp_pitch_deg = use_pitch_raw;
+      g_comp_yaw_deg = yaw_raw_deg;
+    }
+  }
 
   const uint8_t cal_req = takeCalibrationRequest();
   if (cal_req != CAL_REQ_NONE) {
@@ -1027,6 +1137,14 @@ static void controlStep(float dt) {
   g_roll_deg = use_roll_raw - g_level_roll_offset_deg;
   g_pitch_deg = use_pitch_raw - g_level_pitch_offset_deg;
   g_yaw_deg = yaw_raw_deg - g_level_yaw_offset_deg;
+
+  // High-frequency serial output for Processing (100Hz)
+  // Placed here so it runs even without WebSocket connection
+  static uint32_t last_serial_ms = 0;
+  if ((now_ms - last_serial_ms) >= 10) {
+    last_serial_ms = now_ms;
+    Serial.printf("ATT,%.2f,%.2f,%.2f\n", g_roll_deg, g_pitch_deg, g_yaw_deg);
+  }
 
   if (fabsf(g_roll_deg) > cfg.tilt_disarm_deg ||
       fabsf(g_pitch_deg) > cfg.tilt_disarm_deg) {
@@ -1119,7 +1237,10 @@ void setup() {
   g_mpu.calibrateGyro(500, 2);
   Serial.println("Gyro calibration done");
 
-  g_ahrs.begin(kMadgwickBeta);
+  g_ahrs_madgwick.begin(kMadgwickBeta);
+  g_ahrs_mahony.begin(kMahonyKp, kMahonyKi);
+  g_ahrs_mahony.setIntegralLimitRads(kMahonyIntegralLimitRads);
+  g_ahrs_mahony.setSpinRateLimitDps(kMahonySpinLimitDps);
 
   loadTunings();
   applyTunings(g_tunings);
