@@ -48,6 +48,7 @@ class MadgwickImu {
     const float j_32 = 2.0f * j_14or21;
     const float j_33 = 2.0f * j_11or24;
 
+    // NOTE: s = J^T * f (Madgwick original). Sign errors here will cause divergence.
     float s0 = j_11or24 * f1 + j_14or21 * f2;
     float s1 = j_12or23 * f1 - j_13or22 * f2 - j_32 * f3;
     float s2 = j_13or22 * f1 + j_12or23 * f2 + j_33 * f3;
@@ -167,6 +168,196 @@ class MadgwickImu {
   float q3_ = 0.0f;
 };
 
+
+
+// ============================================================
+// Mahony (Betaflight-style DCM) IMU-only
+// - Quaternion propagation with gyro
+// - Gravity correction from accelerometer (when trusted)
+// - Optional integral feedback to estimate gyro bias
+// ============================================================
+
+class MahonyImu {
+ public:
+  void begin(float kp, float ki) {
+    kp_ = kp;
+    ki_ = ki;
+    reset();
+  }
+
+  void reset() {
+    q0_ = 1.0f;
+    q1_ = 0.0f;
+    q2_ = 0.0f;
+    q3_ = 0.0f;
+    integral_fb_x_ = 0.0f;
+    integral_fb_y_ = 0.0f;
+    integral_fb_z_ = 0.0f;
+  }
+
+  void setGains(float kp, float ki) {
+    kp_ = kp;
+    ki_ = ki;
+  }
+
+  void setIntegralLimitRads(float limit_rads) {
+    integral_limit_rads_ = fabsf(limit_rads);
+  }
+
+  void setSpinRateLimitDps(float limit_dps) {
+    spin_rate_limit_rads_ = fabsf(limit_dps) * (float)M_PI / 180.0f;
+  }
+
+  void update(float gx_rads, float gy_rads, float gz_rads,
+              float ax, float ay, float az,
+              float dt, float acc_trust = 1.0f) {
+    if (dt <= 0.0f) {
+      return;
+    }
+
+    float q0 = q0_;
+    float q1 = q1_;
+    float q2 = q2_;
+    float q3 = q3_;
+
+    float ex = 0.0f;
+    float ey = 0.0f;
+    float ez = 0.0f;
+
+    const float norm_a = sqrtf(ax * ax + ay * ay + az * az);
+    const float trust = clampf(acc_trust, 0.0f, 1.0f);
+    const bool acc_ok = (norm_a > 1e-6f) && (trust > 0.0f);
+
+    if (acc_ok) {
+      // Normalize accelerometer.
+      ax /= norm_a;
+      ay /= norm_a;
+      az /= norm_a;
+
+      // Estimated direction of gravity (body frame).
+      const float vx = 2.0f * (q1 * q3 - q0 * q2);
+      const float vy = 2.0f * (q0 * q1 + q2 * q3);
+      const float vz = q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3;
+
+      // Error is cross product between measured and estimated gravity.
+      // e = a x v
+      ex = (ay * vz - az * vy);
+      ey = (az * vx - ax * vz);
+      ez = (ax * vy - ay * vx);
+
+      // Trust weighting.
+      ex *= trust;
+      ey *= trust;
+      ez *= trust;
+
+      // Integral feedback (gyro bias estimation).
+      if (ki_ > 0.0f) {
+        const float gyro_mag = sqrtf(gx_rads * gx_rads + gy_rads * gy_rads + gz_rads * gz_rads);
+        const bool spin_ok = (spin_rate_limit_rads_ <= 0.0f) || (gyro_mag <= spin_rate_limit_rads_);
+        if (spin_ok) {
+          integral_fb_x_ += ki_ * ex * dt;
+          integral_fb_y_ += ki_ * ey * dt;
+          integral_fb_z_ += ki_ * ez * dt;
+
+          if (integral_limit_rads_ > 0.0f) {
+            integral_fb_x_ = clampf(integral_fb_x_, -integral_limit_rads_, integral_limit_rads_);
+            integral_fb_y_ = clampf(integral_fb_y_, -integral_limit_rads_, integral_limit_rads_);
+            integral_fb_z_ = clampf(integral_fb_z_, -integral_limit_rads_, integral_limit_rads_);
+          }
+        }
+      }
+    }
+
+    // Apply proportional + integral feedback to gyro.
+    const float gx = gx_rads + kp_ * ex + integral_fb_x_;
+    const float gy = gy_rads + kp_ * ey + integral_fb_y_;
+    const float gz = gz_rads + kp_ * ez + integral_fb_z_;
+
+    // Integrate quaternion rate.
+    const float qDot0 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);
+    const float qDot1 = 0.5f * ( q0 * gx + q2 * gz - q3 * gy);
+    const float qDot2 = 0.5f * ( q0 * gy - q1 * gz + q3 * gx);
+    const float qDot3 = 0.5f * ( q0 * gz + q1 * gy - q2 * gx);
+
+    q0 += qDot0 * dt;
+    q1 += qDot1 * dt;
+    q2 += qDot2 * dt;
+    q3 += qDot3 * dt;
+
+    const float norm_q = sqrtf(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+    if (norm_q > 1e-6f) {
+      q0 /= norm_q;
+      q1 /= norm_q;
+      q2 /= norm_q;
+      q3 /= norm_q;
+    }
+
+    q0_ = q0;
+    q1_ = q1;
+    q2_ = q2;
+    q3_ = q3;
+  }
+
+  void getEulerDeg(float *roll_deg, float *pitch_deg, float *yaw_deg) const {
+    const float q0 = q0_;
+    const float q1 = q1_;
+    const float q2 = q2_;
+    const float q3 = q3_;
+
+    const float roll = atan2f(2.0f * (q0 * q1 + q2 * q3),
+                              1.0f - 2.0f * (q1 * q1 + q2 * q2));
+    const float sinp = 2.0f * (q0 * q2 - q3 * q1);
+    float pitch = 0.0f;
+    if (fabsf(sinp) >= 1.0f) {
+      pitch = copysignf((float)M_PI / 2.0f, sinp);
+    } else {
+      pitch = asinf(sinp);
+    }
+    const float yaw = atan2f(2.0f * (q0 * q3 + q1 * q2),
+                             1.0f - 2.0f * (q2 * q2 + q3 * q3));
+
+    *roll_deg = roll * 180.0f / (float)M_PI;
+    *pitch_deg = pitch * 180.0f / (float)M_PI;
+    *yaw_deg = yaw * 180.0f / (float)M_PI;
+  }
+
+  void setEulerDeg(float roll_deg, float pitch_deg, float yaw_deg) {
+    const float roll = roll_deg * (float)M_PI / 180.0f;
+    const float pitch = pitch_deg * (float)M_PI / 180.0f;
+    const float yaw = yaw_deg * (float)M_PI / 180.0f;
+    setEulerRad(roll, pitch, yaw);
+  }
+
+  void setEulerRad(float roll, float pitch, float yaw) {
+    const float cr = cosf(roll * 0.5f);
+    const float sr = sinf(roll * 0.5f);
+    const float cp = cosf(pitch * 0.5f);
+    const float sp = sinf(pitch * 0.5f);
+    const float cy = cosf(yaw * 0.5f);
+    const float sy = sinf(yaw * 0.5f);
+
+    q0_ = cr * cp * cy + sr * sp * sy;
+    q1_ = sr * cp * cy - cr * sp * sy;
+    q2_ = cr * sp * cy + sr * cp * sy;
+    q3_ = cr * cp * sy - sr * sp * cy;
+  }
+
+ private:
+  float kp_ = 2.0f;
+  float ki_ = 0.0f;
+
+  float integral_fb_x_ = 0.0f;
+  float integral_fb_y_ = 0.0f;
+  float integral_fb_z_ = 0.0f;
+  float integral_limit_rads_ = 0.35f;  // clamp for bias estimate (rad/s)
+  float spin_rate_limit_rads_ = 0.0f;  // 0 = disabled
+
+  float q0_ = 1.0f;
+  float q1_ = 0.0f;
+  float q2_ = 0.0f;
+  float q3_ = 0.0f;
+};
+
 // ============================================================
 // MPU6050 minimal
 // ============================================================
@@ -238,6 +429,9 @@ class Mpu6050 {
       const float t_g = gx_dps;
       gx_dps = gy_dps;
       gy_dps = t_g;
+      // When swapping XY, also negate to maintain right-hand rule
+      gx_dps = -gx_dps;
+      gy_dps = -gy_dps;
     }
     if (kImuFlipX) {
       ax_g = -ax_g;
