@@ -14,6 +14,12 @@ class MadgwickImu {
     q3_ = 0.0f;
   }
 
+  void setBeta(float beta) {
+    if (beta > 0.0f) {
+      beta_ = beta;
+    }
+  }
+
   void update(float gx_rads, float gy_rads, float gz_rads,
               float ax, float ay, float az,
               float dt) {

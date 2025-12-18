@@ -8,7 +8,7 @@
 #include "drone_types.h"
 
 // ============================================================
-// Pins / config (基板に合わせて変更)
+// Pins / config
 // ============================================================
 
 // WiFi AP
@@ -80,16 +80,22 @@ static const uint32_t kMinTelemPeriodMs = 20;
 static const uint32_t kMaxTelemPeriodMs = 500;
 
 // IMU filter
-static const float kMadgwickBeta = 0.08f;
-// Disarmed時に姿勢を重力方向へ寄せてドリフトを抑える
+static const float kMadgwickBeta = 0.15f;
+static const float kMadgwickBetaMin = 0.02f;
+static const float kMadgwickBetaMax = 0.15f;
+static const float kAccTrustHi = 0.08f;  // |norm-1| <= this -> full trust
+static const float kAccTrustLo = 0.35f;  // |norm-1| >= this -> no trust
+enum FilterMode : uint8_t { FILTER_MADGWICK = 0, FILTER_COMP = 1 };
+static const FilterMode kFilterMode = FILTER_MADGWICK;  // 切替: Madgwick / コンプリメンタリ
+static const float kCompAlpha = 0.98f;  // complementary blend (gyro vs acc)
+
 static const float kRelevelAccTolG = 0.10f;
 static const float kRelevelGyroDps = 1.5f;
 static const uint32_t kRelevelHoldMs = 400;
 
-// Battery telemetry (任意)
-// 使わないなら -1 のままでOK
-static const int kVbattAdcPin = -1;         // 例: 34
-static const float kVbattDividerRatio = 2.0f;  // 分圧比 (VBAT = Vadc * ratio)
+
+static const int kVbattAdcPin = -1;         // Example: 34
+static const float kVbattDividerRatio = 2.0f;  // Divider ratio (VBAT = Vadc * ratio)
 
 // ============================================================
 // Utilities
@@ -302,6 +308,10 @@ static portMUX_TYPE g_killMux = portMUX_INITIALIZER_UNLOCKED;
 
 static uint32_t g_last_telem_ms = 0;
 static uint32_t g_stationary_start_ms = 0;
+static bool g_comp_init = false;
+static float g_comp_roll_deg = 0.0f;
+static float g_comp_pitch_deg = 0.0f;
+static float g_comp_yaw_deg = 0.0f;
 
 enum CalRequest : uint8_t {
   CAL_REQ_NONE = 0,
@@ -477,7 +487,7 @@ static void applyTuningsIfDirty() {
 
   if (dirty) {
     applyTunings(t);
-    // 変更時に積分等が暴れないよう、リセット（飛行中に変えるならここは好み）
+    // 変更時に積分などが暴れないようPIDをリセット
     resetAllPid();
   }
 }
@@ -728,7 +738,6 @@ static void onWsEvent(AsyncWebSocket *server,
   (void)arg;
 
   if (type == WS_EVT_CONNECT) {
-    // 接続直後に現在ゲインを送る
     sendCfgToClient(client);
     return;
   }
@@ -802,7 +811,7 @@ static bool canArm(const RcCommand &rc) {
       fabsf(rc.yaw) > kStickCenterMax) {
     return false;
   }
-  // 機体が変な角度で置かれている状態でのARMを避ける
+
   if (fabsf(g_roll_deg) > 45.0f || fabsf(g_pitch_deg) > 45.0f) {
     return false;
   }
@@ -810,7 +819,7 @@ static bool canArm(const RcCommand &rc) {
 }
 
 static void updateArmingState(const RcCommand &rc, uint32_t now_ms) {
-  // kill latch解除: arm_request OFF + throttle low
+
   if (!rc.arm_request && rc.throttle <= kArmThrottleMax) {
     g_arm_inhibit = false;
   }
@@ -948,6 +957,20 @@ static void controlStep(float dt) {
   const float gx_rads = s.gx_dps * (float)M_PI / 180.0f;
   const float gy_rads = s.gy_dps * (float)M_PI / 180.0f;
   const float gz_rads = s.gz_dps * (float)M_PI / 180.0f;
+
+  // 動的に加速度の信頼度に応じてベータを調整し、ドリフトを抑える
+  float beta_use = kMadgwickBeta;
+  const float acc_norm = sqrtf(s.ax_g * s.ax_g + s.ay_g * s.ay_g + s.az_g * s.az_g);
+  if (isFinitef(acc_norm)) {
+    const float dev = fabsf(acc_norm - 1.0f);
+    if (kAccTrustLo > kAccTrustHi) {
+      float w = (kAccTrustLo - dev) / (kAccTrustLo - kAccTrustHi);  // dev<=Hi ->1, dev>=Lo ->0
+      w = clampf(w, 0.0f, 1.0f);
+      beta_use = kMadgwickBetaMin + w * (kMadgwickBetaMax - kMadgwickBetaMin);
+    }
+  }
+  beta_use = clampf(beta_use, kMadgwickBetaMin, kMadgwickBetaMax);
+  g_ahrs.setBeta(beta_use);
 
   g_ahrs.update(gx_rads, gy_rads, gz_rads, s.ax_g, s.ay_g, s.az_g, dt);
   float roll_raw_deg = 0.0f;
@@ -1142,7 +1165,10 @@ void loop() {
 
     controlStep(dt);
   } else {
-    // WiFi/WSのために少しだけ譲る
     delayMicroseconds(50);
   }
 }
+
+
+
+
