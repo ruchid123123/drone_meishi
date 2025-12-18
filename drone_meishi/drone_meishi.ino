@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <math.h>
+#include <string.h>
 #include "drone_types.h"
 
 // ============================================================
@@ -115,6 +116,9 @@ static const uint32_t kRelevelHoldMs = 400;
 
 static const int kVbattAdcPin = -1;         // e.g. 34
 static const float kVbattDividerRatio = 2.0f;  // voltage divider ratio (VBAT = Vadc * ratio)
+
+// Debug print for high-rate attitude output (100Hz). Set true only when needed.
+static const bool kEnableSerialAttDebug = false;
 
 // ============================================================
 // Utilities
@@ -320,6 +324,7 @@ static float g_motor_last[4] = {0, 0, 0, 0};
 
 static bool g_armed = false;
 static bool g_arm_inhibit = false;
+static bool g_motor_fault = false;
 static uint32_t g_arm_hold_start_ms = 0;
 
 enum FailSafeReason : uint8_t {
@@ -331,6 +336,7 @@ enum FailSafeReason : uint8_t {
   FS_DT_LIMIT = 5,
   FS_KILL = 6,
   FS_MANUAL = 7,
+  FS_MOTOR_FAIL = 8,
 };
 
 static uint8_t g_last_fs = FS_NONE;
@@ -363,6 +369,10 @@ static portMUX_TYPE g_calMux = portMUX_INITIALIZER_UNLOCKED;
 static uint8_t g_cal_state = CAL_STATE_IDLE;
 static uint32_t g_cal_state_until_ms = 0;
 
+static char g_status_msg[96] = "";
+static void setStatusMsg(const char *msg);
+static void setStatusMsgFs(uint8_t reason);
+
 // ============================================================
 // Motor
 // ============================================================
@@ -391,6 +401,10 @@ static void motorWriteNorm(int pin, float u) {
 }
 
 static void motorsWriteAll(float m0, float m1, float m2, float m3) {
+  g_motor_last[0] = m0;
+  g_motor_last[1] = m1;
+  g_motor_last[2] = m2;
+  g_motor_last[3] = m3;
   motorWriteNorm(kMotor0Pin, m0);
   motorWriteNorm(kMotor1Pin, m1);
   motorWriteNorm(kMotor2Pin, m2);
@@ -417,6 +431,7 @@ static void disarmNow(uint8_t reason) {
   g_arm_inhibit = true;
   g_arm_hold_start_ms = 0;
   g_last_fs = reason;
+  setStatusMsgFs(reason);
   resetAllPid();
   motorsWriteAll(0.0f, 0.0f, 0.0f, 0.0f);
 }
@@ -481,6 +496,49 @@ static const char *calStateLabel(uint8_t state) {
     default:
       return "IDLE";
   }
+}
+
+static const char *failSafeLabel(uint8_t reason) {
+  switch (reason) {
+    case FS_CMD_TIMEOUT:
+      return "CMD_TIMEOUT";
+    case FS_WS_DISCONNECT:
+      return "WS_DISCONNECT";
+    case FS_IMU_FAIL:
+      return "IMU_FAIL";
+    case FS_TILT_LIMIT:
+      return "TILT_LIMIT";
+    case FS_DT_LIMIT:
+      return "DT_LIMIT";
+    case FS_KILL:
+      return "KILL";
+    case FS_MANUAL:
+      return "MANUAL";
+    case FS_MOTOR_FAIL:
+      return "MOTOR_FAIL";
+    case FS_NONE:
+    default:
+      return "NONE";
+  }
+}
+
+static void setStatusMsg(const char *msg) {
+  if (msg == nullptr) {
+    g_status_msg[0] = '\0';
+    return;
+  }
+  strncpy(g_status_msg, msg, sizeof(g_status_msg) - 1);
+  g_status_msg[sizeof(g_status_msg) - 1] = '\0';
+}
+
+static void setStatusMsgFs(uint8_t reason) {
+  if (reason == FS_NONE) {
+    setStatusMsg("DISARMED");
+    return;
+  }
+  char buf[64];
+  snprintf(buf, sizeof(buf), "FAILSAFE: %s", failSafeLabel(reason));
+  setStatusMsg(buf);
 }
 
 // ============================================================
@@ -857,30 +915,74 @@ static bool canArm(const RcCommand &rc) {
 }
 
 static void updateArmingState(const RcCommand &rc, uint32_t now_ms) {
+  const bool has_fs = (g_last_fs != FS_NONE);
+
   // kill latch release: arm_request OFF + throttle low
   if (!rc.arm_request && rc.throttle <= kArmThrottleMax) {
-    g_arm_inhibit = false;
+    g_arm_inhibit = g_motor_fault ? true : false;
   }
 
   if (!g_armed) {
     motorsWriteAll(0.0f, 0.0f, 0.0f, 0.0f);
 
-    if (g_arm_inhibit) {
+    if (g_motor_fault) {
+      if (!has_fs) {
+        setStatusMsg("Arm blocked: motor init failed");
+      }
       g_arm_hold_start_ms = 0;
       return;
     }
 
-    if (rc.arm_request && canArm(rc)) {
-      if (g_arm_hold_start_ms == 0) {
-        g_arm_hold_start_ms = now_ms;
+    if (g_arm_inhibit) {
+      g_arm_hold_start_ms = 0;
+      if (!has_fs) {
+        setStatusMsg("Arm blocked: kill latch active");
       }
-      if ((now_ms - g_arm_hold_start_ms) >= kArmHoldMs) {
-        g_armed = true;
-        g_last_fs = FS_NONE;
-        resetAllPid();
+      return;
+    }
+
+    if (rc.arm_request) {
+      const bool throttle_ok = rc.throttle <= kArmThrottleMax;
+      const bool sticks_centered =
+        fabsf(rc.roll) <= kStickCenterMax &&
+        fabsf(rc.pitch) <= kStickCenterMax &&
+        fabsf(rc.yaw) <= kStickCenterMax;
+      const bool level_ok = fabsf(g_roll_deg) <= 45.0f && fabsf(g_pitch_deg) <= 45.0f;
+
+      if (!throttle_ok) {
+        if (!has_fs) {
+          setStatusMsg("Arm blocked: throttle high");
+        }
+        g_arm_hold_start_ms = 0;
+      } else if (!sticks_centered) {
+        if (!has_fs) {
+          setStatusMsg("Arm blocked: sticks not centered");
+        }
+        g_arm_hold_start_ms = 0;
+      } else if (!level_ok) {
+        if (!has_fs) {
+          setStatusMsg("Arm blocked: attitude not level");
+        }
+        g_arm_hold_start_ms = 0;
+      } else if (canArm(rc)) {
+        if (g_arm_hold_start_ms == 0) {
+          g_arm_hold_start_ms = now_ms;
+          if (!has_fs) {
+            setStatusMsg("Arming...");
+          }
+        }
+        if ((now_ms - g_arm_hold_start_ms) >= kArmHoldMs) {
+          g_armed = true;
+          g_last_fs = FS_NONE;
+          setStatusMsg("ARMED");
+          resetAllPid();
+        }
       }
     } else {
       g_arm_hold_start_ms = 0;
+      if (!has_fs) {
+        setStatusMsg("DISARMED");
+      }
     }
     return;
   }
@@ -914,8 +1016,11 @@ static void sendTelemetry(float dt, const RcCommand &rc, uint32_t cmd_age_ms,
   }
 
   const char *cal = calStateLabel(g_cal_state);
+  char msg_buf[96];
+  strncpy(msg_buf, g_status_msg, sizeof(msg_buf) - 1);
+  msg_buf[sizeof(msg_buf) - 1] = '\0';
 
-  char buf[360];
+  char buf[480];
   snprintf(
     buf,
     sizeof(buf),
@@ -927,7 +1032,8 @@ static void sendTelemetry(float dt, const RcCommand &rc, uint32_t cmd_age_ms,
     "\"m0\":%.3f,\"m1\":%.3f,\"m2\":%.3f,\"m3\":%.3f,"
     "\"vbatt\":%s,"
     "\"fs\":%u,"
-    "\"cal\":\"%s\"}",
+    "\"cal\":\"%s\","
+    "\"msg\":\"%s\"}",
     (unsigned long)now_ms,
     g_armed ? 1 : 0,
     g_roll_deg, g_pitch_deg, g_yaw_deg,
@@ -936,7 +1042,8 @@ static void sendTelemetry(float dt, const RcCommand &rc, uint32_t cmd_age_ms,
     g_motor_last[0], g_motor_last[1], g_motor_last[2], g_motor_last[3],
     vbatt_buf,
     (unsigned int)g_last_fs,
-    cal
+    cal,
+    msg_buf
   );
 
   g_ws.textAll(buf);
@@ -944,7 +1051,6 @@ static void sendTelemetry(float dt, const RcCommand &rc, uint32_t cmd_age_ms,
 
 static void controlStep(float dt) {
   applyTuningsIfDirty();
-  g_last_fs = FS_NONE;
 
   RuntimeConfig cfg;
   FilterMode imu_mode = kFilterMode;
@@ -1138,12 +1244,14 @@ static void controlStep(float dt) {
   g_pitch_deg = use_pitch_raw - g_level_pitch_offset_deg;
   g_yaw_deg = yaw_raw_deg - g_level_yaw_offset_deg;
 
-  // High-frequency serial output for Processing (100Hz)
-  // Placed here so it runs even without WebSocket connection
-  static uint32_t last_serial_ms = 0;
-  if ((now_ms - last_serial_ms) >= 10) {
-    last_serial_ms = now_ms;
-    Serial.printf("ATT,%.2f,%.2f,%.2f\n", g_roll_deg, g_pitch_deg, g_yaw_deg);
+  if (kEnableSerialAttDebug) {
+    // High-frequency serial output for Processing (100Hz)
+    // Placed here so it runs even without WebSocket connection
+    static uint32_t last_serial_ms = 0;
+    if ((now_ms - last_serial_ms) >= 10) {
+      last_serial_ms = now_ms;
+      Serial.printf("ATT,%.2f,%.2f,%.2f\n", g_roll_deg, g_pitch_deg, g_yaw_deg);
+    }
   }
 
   if (fabsf(g_roll_deg) > cfg.tilt_disarm_deg ||
@@ -1223,8 +1331,15 @@ void setup() {
   g_led_mode = LED_BOOT;
   ledInit();
 
-  motorInit();
+  const bool motor_ok = motorInit();
   motorsWriteAll(0, 0, 0, 0);
+  if (!motor_ok) {
+    Serial.println("LEDC motor init FAILED");
+    g_motor_fault = true;
+    disarmNow(FS_MOTOR_FAIL);
+    g_led_mode = LED_FAILSAFE;
+    setStatusMsg("FAILSAFE: MOTOR_FAIL (LEDC init)");
+  }
 
   if (!g_mpu.begin()) {
     Serial.println("MPU6050 init FAILED");
@@ -1289,7 +1404,3 @@ void loop() {
     delayMicroseconds(50);
   }
 }
-
-
-
-
