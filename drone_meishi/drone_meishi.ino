@@ -23,8 +23,8 @@ static const uint8_t kMpuAddr = 0x68;
 // IMU axis mapping (sensor -> body)
 // Set these to match your board orientation.
 static const bool kImuSwapXY = true;
-static const bool kImuFlipX = false;
-static const bool kImuFlipY = false;
+static const bool kImuFlipX = true;   // Right roll -> positive
+static const bool kImuFlipY = true;   // Pitch up -> positive
 static const bool kImuFlipZ = false;
 
 // Motors (X configuration example)
