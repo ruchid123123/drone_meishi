@@ -12,6 +12,8 @@ struct RcCommand {
   uint32_t last_ms;
 };
 
+struct MotorTestState;
+
 struct ImuSample {
   float ax_g;
   float ay_g;

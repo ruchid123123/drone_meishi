@@ -29,10 +29,20 @@ static const bool kImuFlipY = true;   // Pitch up -> positive
 static const bool kImuFlipZ = false;
 
 // Motors (X configuration example)
-static const int kMotor0Pin = 12;  // Front Left
+// Front is between M0/M1. Order: FL, FR, RR, RL.
+// static const int kMotor0Pin = 12;  // Front Left
+// static const int kMotor1Pin = 13;  // Front Right
+// static const int kMotor2Pin = 14;  // Rear Right
+// static const int kMotor3Pin = 15;  // Rear Left
+
+static const int kMotor0Pin = 15;  // Front Left
 static const int kMotor1Pin = 13;  // Front Right
-static const int kMotor2Pin = 14;  // Rear Right
-static const int kMotor3Pin = 15;  // Rear Left
+static const int kMotor2Pin = 12;  // Rear Right
+static const int kMotor3Pin = 14;  // Rear Left
+
+static const float kMotorTestMaxThrottle = 0.20f;
+static const uint32_t kMotorTestMinMs = 100;
+static const uint32_t kMotorTestMaxMs = 2000;
 
 // LEDs (LED1: right, LED2: left)
 static const int led1 = 18;
@@ -63,6 +73,10 @@ static const uint32_t kMaxCmdTimeoutMs = 2000;
 static const float kArmThrottleMax = 0.05f;
 static const float kStickCenterMax = 0.15f;
 static const uint32_t kArmHoldMs = 800;
+
+// Torque scaling vs throttle (helps avoid lift at very low throttle)
+static const float kTorqueScaleSlope = 2.0f;  // throttle * slope -> torque scale (0..1)
+static const float kTorqueScaleMin = 0.30f;   // floor to keep some authority at 0 throttle
 
 // Limits
 static const float kDefaultMaxAngleDeg = 30.0f;
@@ -322,6 +336,16 @@ static float g_yaw_deg = 0.0f;
 
 static float g_motor_last[4] = {0, 0, 0, 0};
 
+struct MotorTestState {
+  bool active;
+  uint8_t index;
+  float throttle;
+  uint32_t until_ms;
+};
+
+static MotorTestState g_motor_test = {false, 0, 0.0f, 0};
+static portMUX_TYPE g_motorTestMux = portMUX_INITIALIZER_UNLOCKED;
+
 static bool g_armed = false;
 static bool g_arm_inhibit = false;
 static bool g_motor_fault = false;
@@ -409,6 +433,46 @@ static void motorsWriteAll(float m0, float m1, float m2, float m3) {
   motorWriteNorm(kMotor1Pin, m1);
   motorWriteNorm(kMotor2Pin, m2);
   motorWriteNorm(kMotor3Pin, m3);
+}
+
+static void stopMotorTest() {
+  portENTER_CRITICAL(&g_motorTestMux);
+  g_motor_test.active = false;
+  g_motor_test.throttle = 0.0f;
+  g_motor_test.until_ms = 0;
+  portEXIT_CRITICAL(&g_motorTestMux);
+}
+
+static bool startMotorTest(uint8_t index, float throttle, uint32_t duration_ms) {
+  if (index > 3) {
+    return false;
+  }
+  const float thr = clampf(throttle, 0.0f, kMotorTestMaxThrottle);
+  if (thr <= 0.0f) {
+    stopMotorTest();
+    return false;
+  }
+  const uint32_t dur = clampu32(duration_ms, kMotorTestMinMs, kMotorTestMaxMs);
+  const uint32_t until_ms = millis() + dur;
+
+  portENTER_CRITICAL(&g_motorTestMux);
+  g_motor_test.active = true;
+  g_motor_test.index = index;
+  g_motor_test.throttle = thr;
+  g_motor_test.until_ms = until_ms;
+  portEXIT_CRITICAL(&g_motorTestMux);
+
+  return true;
+}
+
+static bool getMotorTestState(MotorTestState *out) {
+  if (out == nullptr) {
+    return false;
+  }
+  portENTER_CRITICAL(&g_motorTestMux);
+  *out = g_motor_test;
+  portEXIT_CRITICAL(&g_motorTestMux);
+  return out->active;
 }
 
 static void resetAllPid() {
@@ -522,6 +586,21 @@ static const char *failSafeLabel(uint8_t reason) {
   }
 }
 
+static const char *motorIndexLabel(uint8_t index) {
+  switch (index) {
+    case 0:
+      return "M0 FL";
+    case 1:
+      return "M1 FR";
+    case 2:
+      return "M2 RR";
+    case 3:
+      return "M3 RL";
+    default:
+      return "M?";
+  }
+}
+
 static void setStatusMsg(const char *msg) {
   if (msg == nullptr) {
     g_status_msg[0] = '\0';
@@ -591,6 +670,7 @@ static void applyTuningsIfDirty() {
 // - GET
 // - SAVE
 // - CAL,LEVEL|GYRO
+// - MTEST,idx,thr,ms | MTEST,STOP
 // - K   (kill/disarm)
 // ============================================================
 
@@ -799,6 +879,57 @@ static void handleWsText(AsyncWebSocketClient *client, char *msg) {
       return;
     }
     sendAck(client, "CAL", tag, false, "BAD");
+    return;
+  }
+
+  if (strcmp(head, "MTEST") == 0) {
+    const char *tag = strtok_r(nullptr, ",", &saveptr);
+    if (tag == nullptr) {
+      sendAck(client, "MTEST", nullptr, false, "BAD");
+      return;
+    }
+    if (strcmp(tag, "STOP") == 0) {
+      stopMotorTest();
+      sendAck(client, "MTEST", "STOP", true, "OK");
+      return;
+    }
+
+    char *endptr = nullptr;
+    const long idx_long = strtol(tag, &endptr, 10);
+    if (endptr == tag || *endptr != '\0') {
+      sendAck(client, "MTEST", tag, false, "BAD");
+      return;
+    }
+    const char *t_s = strtok_r(nullptr, ",", &saveptr);
+    const char *ms_s = strtok_r(nullptr, ",", &saveptr);
+    if (t_s == nullptr || ms_s == nullptr) {
+      sendAck(client, "MTEST", tag, false, "BAD");
+      return;
+    }
+    if (g_armed) {
+      sendAck(client, "MTEST", tag, false, "ARMED");
+      return;
+    }
+    if (g_motor_fault) {
+      sendAck(client, "MTEST", tag, false, "MOTOR_FAIL");
+      return;
+    }
+    const RcCommand rc = getRcCommand();
+    if (rc.arm_request || rc.throttle > kArmThrottleMax) {
+      sendAck(client, "MTEST", tag, false, "RC_ACTIVE");
+      return;
+    }
+    if (idx_long < 0 || idx_long > 3) {
+      sendAck(client, "MTEST", tag, false, "BAD_IDX");
+      return;
+    }
+    const float thr = (float)atof(t_s);
+    const uint32_t ms = (uint32_t)atoi(ms_s);
+    if (!startMotorTest((uint8_t)idx_long, thr, ms)) {
+      sendAck(client, "MTEST", tag, false, "BAD");
+      return;
+    }
+    sendAck(client, "MTEST", tag, true, "RUN");
     return;
   }
 
@@ -1083,6 +1214,43 @@ static void controlStep(float dt) {
     return;
   }
 
+  MotorTestState mt;
+  if (getMotorTestState(&mt)) {
+    if (mt.until_ms != 0 && (int32_t)(now_ms - mt.until_ms) >= 0) {
+      stopMotorTest();
+      motorsWriteAll(0.0f, 0.0f, 0.0f, 0.0f);
+    } else {
+      float m0 = 0.0f;
+      float m1 = 0.0f;
+      float m2 = 0.0f;
+      float m3 = 0.0f;
+      switch (mt.index) {
+        case 0:
+          m0 = mt.throttle;
+          break;
+        case 1:
+          m1 = mt.throttle;
+          break;
+        case 2:
+          m2 = mt.throttle;
+          break;
+        case 3:
+          m3 = mt.throttle;
+          break;
+        default:
+          break;
+      }
+
+      motorsWriteAll(m0, m1, m2, m3);
+      g_led_mode = LED_DISARMED;
+      char msg[48];
+      snprintf(msg, sizeof(msg), "MOTOR TEST: %s", motorIndexLabel(mt.index));
+      setStatusMsg(msg);
+      sendTelemetry(dt, rc, cmd_age_ms, cfg);
+      return;
+    }
+  }
+
   // Time sanity
   if (dt <= 0.0f || dt > kDtMaxSec) {
     disarmNow(FS_DT_LIMIT);
@@ -1290,9 +1458,14 @@ static void controlStep(float dt) {
   const float pitch_rate_sp_dps = g_pitch_angle_pid.update(pitch_sp_deg - g_pitch_deg, dt);
 
   // Rate -> torque
-  const float roll_torque = g_roll_rate_pid.update(roll_rate_sp_dps - s.gx_dps, dt);
-  const float pitch_torque = g_pitch_rate_pid.update(pitch_rate_sp_dps - s.gy_dps, dt);
-  const float yaw_torque = g_yaw_rate_pid.update(yaw_rate_sp_dps - s.gz_dps, dt);
+  // Blend: keep a floor to retain attitude authority even at zero throttle.
+  const float torque_scale = clampf(kTorqueScaleMin + throttle * kTorqueScaleSlope, 0.0f, 1.0f);
+  float roll_torque = g_roll_rate_pid.update(roll_rate_sp_dps - s.gx_dps, dt);
+  float pitch_torque = g_pitch_rate_pid.update(pitch_rate_sp_dps - s.gy_dps, dt);
+  float yaw_torque = g_yaw_rate_pid.update(yaw_rate_sp_dps - s.gz_dps, dt);
+  roll_torque *= torque_scale;
+  pitch_torque *= torque_scale;
+  yaw_torque *= torque_scale;
 
   if (!isFinitef(roll_torque) || !isFinitef(pitch_torque) || !isFinitef(yaw_torque)) {
     disarmNow(FS_IMU_FAIL);

@@ -97,23 +97,39 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     }
 
     #controlView,
-    #settingsView {
+    #settingsView,
+    #motorTestView {
       flex: 1 1 auto;
       width: 100%;
       min-height: 0;
     }
 
-    #settingsView {
+    #settingsView,
+    #motorTestView {
       display: none;
       overflow: auto;
     }
 
     body[data-mode="control"] #controlView { display: block; }
     body[data-mode="control"] #settingsView { display: none; }
+    body[data-mode="control"] #motorTestView { display: none; }
     body[data-mode="settings"] #controlView { display: none; }
     body[data-mode="settings"] #settingsView { display: block; }
+    body[data-mode="settings"] #motorTestView { display: none; }
+    body[data-mode="motor"] #controlView { display: none; }
+    body[data-mode="motor"] #settingsView { display: none; }
+    body[data-mode="motor"] #motorTestView { display: block; }
 
     #settingsLayout {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: var(--gap);
+      align-items: center;
+      justify-content: flex-start;
+    }
+
+    #motorTestLayout {
       height: 100%;
       display: flex;
       flex-direction: column;
@@ -140,6 +156,13 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     }
 
     #tuneCard {
+      width: min(420px, 96vw);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    #motorTestCard {
       width: min(420px, 96vw);
       display: flex;
       flex-direction: column;
@@ -291,6 +314,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   <div id="modeBar" class="card">
     <button id="modeControl" class="modeBtn active">CONTROL</button>
     <button id="modeSettings" class="modeBtn">SETTINGS</button>
+    <button id="modeMotor" class="modeBtn">MOTOR TEST</button>
   </div>
 
   <div id="controlView">
@@ -422,6 +446,29 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     </div>
   </div>
 
+  <div id="motorTestView">
+    <div id="motorTestLayout">
+      <div class="card" id="motorTestCard">
+        <div class="row">
+          <b>Motor Test</b>
+          <span class="muted">Props off</span>
+        </div>
+        <div class="row">
+          Throttle <input id="motorTestThrottle" type="number" step="0.01" min="0" max="0.25">
+          Duration <input id="motorTestMs" type="number" step="50" min="50" max="2000"> ms
+          <button id="motorTestStop" class="danger">STOP</button>
+        </div>
+        <div class="row">
+          <button id="motorTest0">M0 Front Left</button>
+          <button id="motorTest1">M1 Front Right</button>
+          <button id="motorTest2">M2 Rear Right</button>
+          <button id="motorTest3">M3 Rear Left</button>
+        </div>
+        <small class="muted">X config: front is between M0/M1.</small>
+      </div>
+    </div>
+  </div>
+
 <script>
 (() => {
   const wsLabel = document.getElementById('ws');
@@ -447,6 +494,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
 
   const modeControl = document.getElementById('modeControl');
   const modeSettings = document.getElementById('modeSettings');
+  const modeMotor = document.getElementById('modeMotor');
 
   const armSwitch = document.getElementById('armSwitch');
   const disarmBtn = document.getElementById('disarmBtn');
@@ -480,6 +528,14 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   const leftStick = document.getElementById('leftStick');
   const rightJoy = document.getElementById('rightJoy');
   const rightStick = document.getElementById('rightStick');
+
+  const motorTestThrottle = document.getElementById('motorTestThrottle');
+  const motorTestMs = document.getElementById('motorTestMs');
+  const motorTestStop = document.getElementById('motorTestStop');
+  const motorTest0 = document.getElementById('motorTest0');
+  const motorTest1 = document.getElementById('motorTest1');
+  const motorTest2 = document.getElementById('motorTest2');
+  const motorTest3 = document.getElementById('motorTest3');
 
   let ws = null;
 
@@ -550,7 +606,11 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     document.body.dataset.mode = mode;
     if (modeControl) modeControl.classList.toggle('active', mode === 'control');
     if (modeSettings) modeSettings.classList.toggle('active', mode === 'settings');
-    if (mode === 'settings') {
+    if (modeMotor) modeMotor.classList.toggle('active', mode === 'motor');
+    if (mode !== 'motor') {
+      sendMotorTestStop();
+    }
+    if (mode === 'settings' || mode === 'motor') {
       armReq = 0;
       if (armSwitch) armSwitch.checked = false;
       thr = 0;
@@ -729,6 +789,9 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   if (modeSettings) {
     modeSettings.addEventListener('click', () => setMode('settings'));
   }
+  if (modeMotor) {
+    modeMotor.addEventListener('click', () => setMode('motor'));
+  }
 
   if (armSwitch) {
     armSwitch.addEventListener('change', () => {
@@ -770,6 +833,11 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     }
     ws.send(text);
     return true;
+  }
+
+  function sendMotorTestStop() {
+    if (!ws || ws.readyState !== 1) return;
+    ws.send('MTEST,STOP');
   }
 
   function sendPid(tag, kp, ki, kd) {
@@ -843,6 +911,35 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     });
   }
 
+  function sendMotorTest(idx) {
+    const thrVal = readNumberInput(motorTestThrottle);
+    const msVal = readNumberInput(motorTestMs);
+    const thr = thrVal !== null ? thrVal : 0.12;
+    const ms = msVal !== null ? Math.round(msVal) : 600;
+    const thrClamped = clamp(thr, 0, 0.25);
+    const msClamped = clamp(ms, 50, 2000);
+    sendWs(`MTEST,${idx},${thrClamped.toFixed(3)},${msClamped}`, `MTEST M${idx} sent`);
+  }
+
+  if (motorTestStop) {
+    motorTestStop.addEventListener('click', () => {
+      sendMotorTestStop();
+      setStatus('MTEST STOP', 1500);
+    });
+  }
+  if (motorTest0) {
+    motorTest0.addEventListener('click', () => sendMotorTest(0));
+  }
+  if (motorTest1) {
+    motorTest1.addEventListener('click', () => sendMotorTest(1));
+  }
+  if (motorTest2) {
+    motorTest2.addEventListener('click', () => sendMotorTest(2));
+  }
+  if (motorTest3) {
+    motorTest3.addEventListener('click', () => sendMotorTest(3));
+  }
+
   function makeJoystick(areaEl, stickEl, cfg) {
     const maxR = () => joyMaxR(areaEl);
     let activeId = null;
@@ -908,7 +1005,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     initialNx: 0,
     initialNy: 1,
     onMove: (nx, ny) => {
-      yaw = clamp(nx, -1, 1);
+      yaw = clamp(-nx, -1, 1);
       thr = nyToThrottle(ny);
       updateThrottleUi();
     },
@@ -927,7 +1024,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     initialNy: 0,
     onMove: (nx, ny) => {
       roll = clamp(nx, -1, 1);
-      pitch = clamp(-ny, -1, 1);
+      pitch = clamp(ny, -1, 1);
     },
     onRelease: () => {
       roll = 0;
@@ -947,6 +1044,8 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
 
   thr = 0;
   updateThrottleUi();
+  if (motorTestThrottle) motorTestThrottle.value = 0.12;
+  if (motorTestMs) motorTestMs.value = 600;
   setMode('control');
   connectWs();
 })();
