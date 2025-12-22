@@ -79,7 +79,7 @@ static const uint32_t kArmHoldMs = 800;
 
 // Torque scaling vs throttle (helps avoid lift at very low throttle)
 static const float kDefaultTorqueScaleSlope = 2.0f;  // throttle * slope -> torque scale (0..1)
-static const float kDefaultTorqueScaleMin = 0.50f;   // floor to keep some authority at 0 throttle
+static const float kDefaultTorqueScaleMin = 0.20f;   // floor to keep some authority at 0 throttle
 static const float kMinTorqueScaleSlope = 0.0f;
 static const float kMaxTorqueScaleSlope = 4.0f;
 static const float kMinTorqueScaleMin = 0.0f;
@@ -230,9 +230,9 @@ static RuntimeConfig g_config = {
 };
 
 static Tunings g_tunings = {
-  {4.0f, 0.0f, 0.0f},       // angle
-  {0.010f, 0.0f, 0.0002f},  // rate
-  {0.010f, 0.0f, 0.0f},     // yaw
+  {2.0f, 0.001f, 0.0f},     // angle
+  {0.025f, 0.0f, 0.0002f},  // rate
+  {0.030f, 0.0f, 0.0f},     // yaw
 };
 
 static float g_level_roll_offset_deg = 0.0f;
