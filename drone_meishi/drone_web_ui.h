@@ -200,6 +200,9 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
       position: relative;
       touch-action: none;
       user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
       overflow: hidden;
     }
 
@@ -208,6 +211,10 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
       left: 10px;
       top: 10px;
       font-size: 14px;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
     }
 
     .stick {
@@ -220,6 +227,10 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
       left: 50%;
       top: 50%;
       transform: translate(-50%,-50%);
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
     }
 
     #centerCol {
@@ -400,9 +411,9 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         <div class="section">
           <b>Angle (Roll/Pitch)</b>
           <div class="row">
-            Kp <input id="aKp" type="number" step="0.001">
-            Ki <input id="aKi" type="number" step="0.001">
-            Kd <input id="aKd" type="number" step="0.001">
+            Kp <input id="aKp" type="number" step="0.001" inputmode="decimal">
+            Ki <input id="aKi" type="number" step="0.001" inputmode="decimal">
+            Kd <input id="aKd" type="number" step="0.001" inputmode="decimal">
             <button id="applyAngle">Apply</button>
           </div>
         </div>
@@ -410,9 +421,9 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         <div class="section">
           <b>Rate (Roll/Pitch)</b>
           <div class="row">
-            Kp <input id="rKp" type="number" step="0.0001">
-            Ki <input id="rKi" type="number" step="0.0001">
-            Kd <input id="rKd" type="number" step="0.0001">
+            Kp <input id="rKp" type="number" step="0.0001" inputmode="decimal">
+            Ki <input id="rKi" type="number" step="0.0001" inputmode="decimal">
+            Kd <input id="rKd" type="number" step="0.0001" inputmode="decimal">
             <button id="applyRate">Apply</button>
           </div>
         </div>
@@ -420,9 +431,9 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         <div class="section">
           <b>Yaw Rate</b>
           <div class="row">
-            Kp <input id="yKp" type="number" step="0.0001">
-            Ki <input id="yKi" type="number" step="0.0001">
-            Kd <input id="yKd" type="number" step="0.0001">
+            Kp <input id="yKp" type="number" step="0.0001" inputmode="decimal">
+            Ki <input id="yKi" type="number" step="0.0001" inputmode="decimal">
+            Kd <input id="yKd" type="number" step="0.0001" inputmode="decimal">
             <button id="applyYaw">Apply</button>
           </div>
         </div>
@@ -430,15 +441,19 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
         <div class="section">
           <b>Limits</b>
           <div class="row">
-            Max angle <input id="maxAngle" type="number" step="1">
-            Max yaw <input id="maxYawRate" type="number" step="1">
+            Max angle <input id="maxAngle" type="number" step="1" inputmode="decimal">
+            Max yaw <input id="maxYawRate" type="number" step="1" inputmode="decimal">
           </div>
           <div class="row">
-            Tilt disarm <input id="tiltDisarm" type="number" step="1">
-            Cmd timeout <input id="cmdTimeout" type="number" step="10">
+            Tilt disarm <input id="tiltDisarm" type="number" step="1" inputmode="decimal">
+            Cmd timeout <input id="cmdTimeout" type="number" step="10" inputmode="decimal">
           </div>
           <div class="row">
-            Telem ms <input id="telemMs" type="number" step="10">
+            Torque min <input id="torqueMin" type="number" step="0.01" min="0" max="1" inputmode="decimal">
+            Torque slope <input id="torqueSlope" type="number" step="0.1" min="0" max="4" inputmode="decimal">
+          </div>
+          <div class="row">
+            Telem ms <input id="telemMs" type="number" step="10" inputmode="decimal">
             <button id="applyLimits">Apply Limits</button>
           </div>
         </div>
@@ -454,8 +469,8 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
           <span class="muted">Props off</span>
         </div>
         <div class="row">
-          Throttle <input id="motorTestThrottle" type="number" step="0.01" min="0" max="0.25">
-          Duration <input id="motorTestMs" type="number" step="50" min="50" max="2000"> ms
+          Throttle <input id="motorTestThrottle" type="number" step="0.01" min="0" max="0.25" inputmode="decimal">
+          Duration <input id="motorTestMs" type="number" step="50" min="50" max="2000" inputmode="decimal"> ms
           <button id="motorTestStop" class="danger">STOP</button>
         </div>
         <div class="row">
@@ -522,6 +537,8 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   const tiltDisarm = document.getElementById('tiltDisarm');
   const cmdTimeout = document.getElementById('cmdTimeout');
   const telemMs = document.getElementById('telemMs');
+  const torqueMin = document.getElementById('torqueMin');
+  const torqueSlope = document.getElementById('torqueSlope');
   const applyLimits = document.getElementById('applyLimits');
 
   const leftJoy = document.getElementById('leftJoy');
@@ -547,6 +564,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
 
   let lastAtt = { roll: 0, pitch: 0, yaw: 0 };
   let statusTimer = null;
+  const refreshJoysticks = [];
 
   const fsMap = {
     0: 'NONE',
@@ -774,6 +792,8 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
             if (tiltDisarm) tiltDisarm.value = obj.limits.tilt_disarm;
             if (cmdTimeout) cmdTimeout.value = obj.limits.cmd_timeout;
             if (telemMs) telemMs.value = obj.limits.telem_ms;
+            if (torqueMin) torqueMin.value = obj.limits.torque_min;
+            if (torqueSlope) torqueSlope.value = obj.limits.torque_slope;
           }
           setStatus('CFG updated', 2000);
         }
@@ -902,12 +922,16 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
       const tiltVal = readNumberInput(tiltDisarm);
       const cmdVal = readNumberInput(cmdTimeout);
       const telemVal = readNumberInput(telemMs);
+      const torqueMinVal = readNumberInput(torqueMin);
+      const torqueSlopeVal = readNumberInput(torqueSlope);
 
       if (maxAngleVal !== null) sendCfg('MAX_ANGLE', maxAngleVal);
       if (maxYawVal !== null) sendCfg('MAX_YAW_RATE', maxYawVal);
       if (tiltVal !== null) sendCfg('TILT_DISARM', tiltVal);
       if (cmdVal !== null) sendCfg('CMD_TIMEOUT', Math.round(cmdVal));
       if (telemVal !== null) sendCfg('TELEM_MS', Math.round(telemVal));
+      if (torqueMinVal !== null) sendCfg('TORQUE_MIN', torqueMinVal);
+      if (torqueSlopeVal !== null) sendCfg('TORQUE_SLOPE', torqueSlopeVal);
     });
   }
 
@@ -956,6 +980,9 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
     requestAnimationFrame(() => {
       setStick(curNx, curNy);
     });
+
+    const refresh = () => setStick(curNx, curNy);
+    refreshJoysticks.push(refresh);
 
     areaEl.addEventListener('pointerdown', (e) => {
       activeId = e.pointerId;
@@ -1040,6 +1067,7 @@ static const char kIndexHtml[] PROGMEM = R"HTML(
   window.addEventListener('resize', () => {
     resizeAttCanvas();
     drawAttitude(lastAtt.roll, lastAtt.pitch, lastAtt.yaw);
+    refreshJoysticks.forEach((fn) => fn());
   });
 
   thr = 0;

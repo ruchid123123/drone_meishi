@@ -6,6 +6,7 @@
 #include <Wire.h>
 #include <math.h>
 #include <string.h>
+#include <esp32-hal-ledc.h>
 #include "drone_types.h"
 
 // ============================================================
@@ -61,6 +62,8 @@ static const int kMotor0Ch = 0;
 static const int kMotor1Ch = 1;
 static const int kMotor2Ch = 2;
 static const int kMotor3Ch = 3;
+static const int kLed1Ch = 4;
+static const int kLed2Ch = 5;
 
 // Control loop
 static const uint32_t kLoopPeriodUs = 2000;  // 500Hz
@@ -75,8 +78,12 @@ static const float kStickCenterMax = 0.15f;
 static const uint32_t kArmHoldMs = 800;
 
 // Torque scaling vs throttle (helps avoid lift at very low throttle)
-static const float kTorqueScaleSlope = 2.0f;  // throttle * slope -> torque scale (0..1)
-static const float kTorqueScaleMin = 0.30f;   // floor to keep some authority at 0 throttle
+static const float kDefaultTorqueScaleSlope = 2.0f;  // throttle * slope -> torque scale (0..1)
+static const float kDefaultTorqueScaleMin = 0.50f;   // floor to keep some authority at 0 throttle
+static const float kMinTorqueScaleSlope = 0.0f;
+static const float kMaxTorqueScaleSlope = 4.0f;
+static const float kMinTorqueScaleMin = 0.0f;
+static const float kMaxTorqueScaleMin = 1.0f;
 
 // Limits
 static const float kDefaultMaxAngleDeg = 30.0f;
@@ -218,6 +225,8 @@ static RuntimeConfig g_config = {
   kDefaultTiltDisarmDeg,
   kDefaultCmdTimeoutMs,
   kDefaultTelemPeriodMs,
+  kDefaultTorqueScaleMin,
+  kDefaultTorqueScaleSlope,
 };
 
 static Tunings g_tunings = {
@@ -244,6 +253,8 @@ static void clampConfig(RuntimeConfig *cfg) {
   cfg->tilt_disarm_deg = clampf(cfg->tilt_disarm_deg, kMinTiltDisarmDeg, kMaxTiltDisarmDeg);
   cfg->cmd_timeout_ms = clampu32(cfg->cmd_timeout_ms, kMinCmdTimeoutMs, kMaxCmdTimeoutMs);
   cfg->telem_period_ms = clampu32(cfg->telem_period_ms, kMinTelemPeriodMs, kMaxTelemPeriodMs);
+  cfg->torque_scale_min = clampf(cfg->torque_scale_min, kMinTorqueScaleMin, kMaxTorqueScaleMin);
+  cfg->torque_scale_slope = clampf(cfg->torque_scale_slope, kMinTorqueScaleSlope, kMaxTorqueScaleSlope);
 }
 
 static void loadTunings() {
@@ -266,6 +277,8 @@ static void loadTunings() {
   g_config.tilt_disarm_deg = g_prefs.getFloat("tilt_dis", g_config.tilt_disarm_deg);
   g_config.cmd_timeout_ms = g_prefs.getUInt("cmd_to", g_config.cmd_timeout_ms);
   g_config.telem_period_ms = g_prefs.getUInt("telem_ms", g_config.telem_period_ms);
+  g_config.torque_scale_min = g_prefs.getFloat("tq_min", g_config.torque_scale_min);
+  g_config.torque_scale_slope = g_prefs.getFloat("tq_slope", g_config.torque_scale_slope);
   clampConfig(&g_config);
 
   g_level_roll_offset_deg = g_prefs.getFloat("lvl_roll", g_level_roll_offset_deg);
@@ -301,6 +314,8 @@ static void saveTunings() {
   g_prefs.putFloat("tilt_dis", g_config.tilt_disarm_deg);
   g_prefs.putUInt("cmd_to", g_config.cmd_timeout_ms);
   g_prefs.putUInt("telem_ms", g_config.telem_period_ms);
+  g_prefs.putFloat("tq_min", g_config.torque_scale_min);
+  g_prefs.putFloat("tq_slope", g_config.torque_scale_slope);
 
   g_prefs.putFloat("lvl_roll", g_level_roll_offset_deg);
   g_prefs.putFloat("lvl_pitch", g_level_pitch_offset_deg);
@@ -666,7 +681,8 @@ static void applyTuningsIfDirty() {
 // - PID,ANGLE,kp,ki,kd
 // - PID,RATE,kp,ki,kd
 // - PID,YAW,kp,ki,kd
-// - CFG,KEY,VALUE (MAX_ANGLE, MAX_YAW_RATE, TILT_DISARM, CMD_TIMEOUT, TELEM_MS)
+// - CFG,KEY,VALUE (MAX_ANGLE, MAX_YAW_RATE, TILT_DISARM, CMD_TIMEOUT, TELEM_MS,
+//                  TORQUE_MIN, TORQUE_SLOPE, IMU_FILTER)
 // - GET
 // - SAVE
 // - CAL,LEVEL|GYRO
@@ -688,7 +704,7 @@ static void sendCfgToClient(AsyncWebSocketClient *client) {
   imu = g_filter_mode;
   portEXIT_CRITICAL(&g_cfgMux);
 
-  char buf[420];
+  char buf[520];
   snprintf(
     buf,
     sizeof(buf),
@@ -696,13 +712,15 @@ static void sendCfgToClient(AsyncWebSocketClient *client) {
     "\"rate\":{\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f},"
     "\"yaw\":{\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f},"
     "\"limits\":{\"max_angle\":%.2f,\"max_yaw_rate\":%.2f,\"tilt_disarm\":%.2f,"
-    "\"cmd_timeout\":%lu,\"telem_ms\":%lu}}",
+    "\"cmd_timeout\":%lu,\"telem_ms\":%lu,"
+    "\"torque_min\":%.3f,\"torque_slope\":%.3f}}",
     (unsigned int)imu,
     t.angle.kp, t.angle.ki, t.angle.kd,
     t.rate.kp, t.rate.ki, t.rate.kd,
     t.yaw.kp, t.yaw.ki, t.yaw.kd,
     cfg.max_angle_deg, cfg.max_yaw_rate_dps, cfg.tilt_disarm_deg,
-    (unsigned long)cfg.cmd_timeout_ms, (unsigned long)cfg.telem_period_ms
+    (unsigned long)cfg.cmd_timeout_ms, (unsigned long)cfg.telem_period_ms,
+    cfg.torque_scale_min, cfg.torque_scale_slope
   );
 
   client->text(buf);
@@ -807,6 +825,14 @@ static void handleCfgMsg(char *saveptr) {
     g_config.cmd_timeout_ms = clampu32(vu, kMinCmdTimeoutMs, kMaxCmdTimeoutMs);
   } else if (strcmp(key, "TELEM_MS") == 0) {
     g_config.telem_period_ms = clampu32(vu, kMinTelemPeriodMs, kMaxTelemPeriodMs);
+  } else if (strcmp(key, "TORQUE_MIN") == 0) {
+    if (isFinitef(vf)) {
+      g_config.torque_scale_min = clampf(vf, kMinTorqueScaleMin, kMaxTorqueScaleMin);
+    }
+  } else if (strcmp(key, "TORQUE_SLOPE") == 0) {
+    if (isFinitef(vf)) {
+      g_config.torque_scale_slope = clampf(vf, kMinTorqueScaleSlope, kMaxTorqueScaleSlope);
+    }
   } else if (strcmp(key, "IMU_FILTER") == 0) {
     // 0: Madgwick, 1: Mahony, 2: Complementary
     if (!g_armed && vu <= (uint32_t)FILTER_COMP) {
@@ -1459,7 +1485,7 @@ static void controlStep(float dt) {
 
   // Rate -> torque
   // Blend: keep a floor to retain attitude authority even at zero throttle.
-  const float torque_scale = clampf(kTorqueScaleMin + throttle * kTorqueScaleSlope, 0.0f, 1.0f);
+  const float torque_scale = clampf(cfg.torque_scale_min + throttle * cfg.torque_scale_slope, 0.0f, 1.0f);
   float roll_torque = g_roll_rate_pid.update(roll_rate_sp_dps - s.gx_dps, dt);
   float pitch_torque = g_pitch_rate_pid.update(pitch_rate_sp_dps - s.gy_dps, dt);
   float yaw_torque = g_yaw_rate_pid.update(yaw_rate_sp_dps - s.gz_dps, dt);

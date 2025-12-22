@@ -4,6 +4,8 @@
 // LED status
 // ============================================================
 
+#include <esp32-hal-ledc.h>
+
 enum LedMode : uint8_t {
   LED_BOOT = 0,
   LED_DISARMED = 1,

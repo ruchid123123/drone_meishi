@@ -29,6 +29,8 @@ struct RuntimeConfig {
   float tilt_disarm_deg;
   uint32_t cmd_timeout_ms;
   uint32_t telem_period_ms;
+  float torque_scale_min;
+  float torque_scale_slope;
 };
 
 struct PidTriplet {
