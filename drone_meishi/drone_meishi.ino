@@ -30,12 +30,7 @@ static const bool kImuFlipY = true;   // Pitch up -> positive
 static const bool kImuFlipZ = false;
 
 // Motors (X configuration example)
-// Front is between M0/M1. Order: FL, FR, RR, RL.
-// static const int kMotor0Pin = 12;  // Front Left
-// static const int kMotor1Pin = 13;  // Front Right
-// static const int kMotor2Pin = 14;  // Rear Right
-// static const int kMotor3Pin = 15;  // Rear Left
-
+// Front is between M0/M1. Order: FL, FR, RR, RL
 static const int kMotor0Pin = 15;  // Front Left
 static const int kMotor1Pin = 13;  // Front Right
 static const int kMotor2Pin = 12;  // Rear Right
