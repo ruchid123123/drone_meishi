@@ -132,7 +132,6 @@ static const float kVbattDividerRatio = 2.0f;  // voltage divider ratio (VBAT = 
 
 // Debug output / 调试输出
 static const bool kEnableSerialAttDebug = false;  // High-rate attitude output / 高速姿态输出
-static const bool kEnableSerialAttDebug = false;
 
 // ============================================================
 // Utilities

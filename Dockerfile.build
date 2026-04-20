@@ -1,0 +1,33 @@
+FROM ubuntu:24.04
+
+# 使用阿里云 Ubuntu 镜像源
+RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list && \
+    sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
+
+# 安装基础依赖
+RUN apt-get update && apt-get install -y \
+    curl \
+    python3 \
+    python3-pip \
+    python3-setuptools \
+    python3-serial \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# 从宿主机复制已有的 arduino-cli
+COPY ./arduino-cli-bin /usr/local/bin/arduino-cli
+RUN chmod +x /usr/local/bin/arduino-cli
+
+ENV PATH="/usr/local/bin:${PATH}"
+
+# 配置 arduino-cli 使用国内 ESP32 镜像源 (arduino.me)
+RUN arduino-cli config init && \
+    arduino-cli config add board_manager.additional_urls https://arduino.me/packages/esp32.json && \
+    arduino-cli core update-index && \
+    arduino-cli core install esp32:esp32
+
+# 安装项目依赖库
+RUN arduino-cli lib install "ESPAsyncWebServer" "AsyncTCP"
+
+WORKDIR /workspace
+ENTRYPOINT ["arduino-cli"]
