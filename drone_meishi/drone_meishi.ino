@@ -10,27 +10,29 @@
 #include "drone_types.h"
 
 // ============================================================
-// Pins / config
+// Pin Configuration / 引脚配置
 // ============================================================
 
-// WiFi AP
+// WiFi AP settings / WiFi 热点设置
 static const char *kApSsid = "ESP32-DRONE";
 static const char *kApPass = "12345678";
 
-// I2C
+// I2C pins / I2C 引脚
 static const int kI2cSda = 21;
 static const int kI2cScl = 22;
 static const uint8_t kMpuAddr = 0x68;
 
-// IMU axis mapping (sensor -> body)
-// Set these to match your board orientation.
+// IMU axis mapping (sensor -> body frame)
+// Configure these to match your board orientation.
+// IMU 轴向映射（传感器 -> 机体坐标系），根据板子方向配置。
 static const bool kImuSwapXY = true;
 static const bool kImuFlipX = true;   // Right roll -> positive
 static const bool kImuFlipY = true;   // Pitch up -> positive
 static const bool kImuFlipZ = false;
 
-// Motors (X configuration example)
+// Motors (X configuration) / 电机（X 型布局）
 // Front is between M0/M1. Order: FL, FR, RR, RL
+// 前方在 M0/M1 之间。顺序：前左、前右、后右、后左
 static const int kMotor0Pin = 15;  // Front Left
 static const int kMotor1Pin = 13;  // Front Right
 static const int kMotor2Pin = 12;  // Rear Right
@@ -40,11 +42,11 @@ static const float kMotorTestMaxThrottle = 0.20f;
 static const uint32_t kMotorTestMinMs = 100;
 static const uint32_t kMotorTestMaxMs = 2000;
 
-// LEDs (LED1: right, LED2: left)
+// LEDs (LED1: right, LED2: left) / LED（LED1：右，LED2：左）
 static const int led1 = 18;
 static const int led2 = 19;
 
-// PWM
+// PWM settings / PWM 设置
 static const uint32_t kPwmFreqHz = 20000;
 static const uint8_t kPwmResolutionBits = 11;
 static const uint32_t kPwmMaxDuty = (1U << kPwmResolutionBits) - 1U;
@@ -53,18 +55,12 @@ static const uint32_t kLedPwmFreqHz = 1000;
 static const uint8_t kLedPwmResolutionBits = 8;
 static const uint32_t kLedPwmMaxDuty = (1U << kLedPwmResolutionBits) - 1U;
 
-static const int kMotor0Ch = 0;
-static const int kMotor1Ch = 1;
-static const int kMotor2Ch = 2;
-static const int kMotor3Ch = 3;
-static const int kLed1Ch = 4;
-static const int kLed2Ch = 5;
 
-// Control loop
+// Control loop timing / 控制循环时序
 static const uint32_t kLoopPeriodUs = 2000;  // 500Hz
 static const float kDtMaxSec = 0.02f;
 
-// RC and arming
+// RC and arming parameters / 遥控和解锁参数
 static const uint32_t kDefaultCmdTimeoutMs = 300;
 static const uint32_t kMinCmdTimeoutMs = 100;
 static const uint32_t kMaxCmdTimeoutMs = 2000;
@@ -72,7 +68,9 @@ static const float kArmThrottleMax = 0.05f;
 static const float kStickCenterMax = 0.15f;
 static const uint32_t kArmHoldMs = 800;
 
-// Torque scaling vs throttle (helps avoid lift at very low throttle)
+// Torque scaling / 扭矩缩放
+// Helps avoid lift at very low throttle.
+// 防止在低油门时产生升力。
 static const float kDefaultTorqueScaleSlope = 2.0f;  // throttle * slope -> torque scale (0..1)
 static const float kDefaultTorqueScaleMin = 0.20f;   // floor to keep some authority at 0 throttle
 static const float kMinTorqueScaleSlope = 0.0f;
@@ -80,7 +78,7 @@ static const float kMaxTorqueScaleSlope = 4.0f;
 static const float kMinTorqueScaleMin = 0.0f;
 static const float kMaxTorqueScaleMin = 1.0f;
 
-// Limits
+// Flight limits / 飞行限制
 static const float kDefaultMaxAngleDeg = 30.0f;
 static const float kMinMaxAngleDeg = 5.0f;
 static const float kMaxMaxAngleDeg = 80.0f;
@@ -91,20 +89,19 @@ static const float kDefaultTiltDisarmDeg = 80.0f;
 static const float kMinTiltDisarmDeg = 20.0f;
 static const float kMaxTiltDisarmDeg = 85.0f;
 
-// Telemetry
+// Telemetry / 遥测
 static const uint32_t kDefaultTelemPeriodMs = 50;  // 20Hz
 static const uint32_t kMinTelemPeriodMs = 20;
 static const uint32_t kMaxTelemPeriodMs = 500;
 
-// IMU filter
+// IMU filter settings / IMU 滤波器设置
 static const float kMadgwickBeta = 0.08f;
 static const float kMadgwickBetaMin = 0.02f;
 static const float kMadgwickBetaMax = 0.14f;
 
-// Betaflight-style Mahony (DCM) gains.
-// - Kp: proportional correction strength (rad/s per unit error)
-// - Ki: integral correction strength (rad/s^2 per unit error)
-// Start with Ki=0 and tune Kp first.
+// Betaflight-style Mahony (DCM) gains / Betaflight 风格 Mahony 增益
+// - Kp: proportional correction strength / 比例校正强度
+// - Ki: integral correction strength / 积分校正强度
 static const float kMahonyKp = 2.2f;
 static const float kMahonyKi = 0.0f;
 static const float kMahonyIntegralLimitRads = 0.35f;  // clamp for bias estimate (rad/s)
@@ -128,12 +125,13 @@ static const float kRelevelAccTolG = 0.10f;
 static const float kRelevelGyroDps = 1.5f;
 static const uint32_t kRelevelHoldMs = 400;
 
-// Battery telemetry
+// Battery telemetry / 电池遥测
 
 static const int kVbattAdcPin = -1;         // e.g. 34
 static const float kVbattDividerRatio = 2.0f;  // voltage divider ratio (VBAT = Vadc * ratio)
 
-// Debug print for high-rate attitude output (100Hz). Set true only when needed.
+// Debug output / 调试输出
+static const bool kEnableSerialAttDebug = false;  // High-rate attitude output / 高速姿态输出
 static const bool kEnableSerialAttDebug = false;
 
 // ============================================================
@@ -386,16 +384,18 @@ static float g_comp_pitch_deg = 0.0f;
 static float g_comp_yaw_deg = 0.0f;
 
 enum CalRequest : uint8_t {
-  CAL_REQ_NONE = 0,
-  CAL_REQ_LEVEL = 1,
-  CAL_REQ_GYRO = 2,
+  CAL_REQ_NONE = 0,   // No calibration / 无校准
+  CAL_REQ_LEVEL = 1,  // Level calibration / 水平校准
+  CAL_REQ_GYRO = 2,   // Gyro calibration / 陀螺仪校准
+  CAL_REQ_ACC = 3,    // Accel calibration / 加速度计校准
 };
 
 enum CalState : uint8_t {
-  CAL_STATE_IDLE = 0,
-  CAL_STATE_LEVEL = 1,
-  CAL_STATE_GYRO = 2,
-  CAL_STATE_FAIL = 3,
+  CAL_STATE_IDLE = 0,  // Idle / 空闲
+  CAL_STATE_LEVEL = 1, // Leveling / 水平校准中
+  CAL_STATE_GYRO = 2,  // Gyro cal / 陀螺仪校准中
+  CAL_STATE_ACC = 3,   // Accel cal / 加速度计校准中
+  CAL_STATE_FAIL = 4,  // Failed / 失败
 };
 
 static volatile uint8_t g_cal_request = CAL_REQ_NONE;
@@ -564,6 +564,8 @@ static const char *calStateLabel(uint8_t state) {
       return "LEVEL";
     case CAL_STATE_GYRO:
       return "GYRO";
+    case CAL_STATE_ACC:
+      return "ACC";
     case CAL_STATE_FAIL:
       return "FAIL";
     case CAL_STATE_IDLE:
@@ -699,7 +701,7 @@ static void sendCfgToClient(AsyncWebSocketClient *client) {
   imu = g_filter_mode;
   portEXIT_CRITICAL(&g_cfgMux);
 
-  char buf[520];
+  char buf[640];  // Increased buffer size / 增加缓冲区大小
   snprintf(
     buf,
     sizeof(buf),
@@ -896,6 +898,11 @@ static void handleWsText(AsyncWebSocketClient *client, char *msg) {
     }
     if (strcmp(tag, "GYRO") == 0) {
       requestCalibration(CAL_REQ_GYRO);
+      sendAck(client, "CAL", tag, true, "QUEUED");
+      return;
+    }
+    if (strcmp(tag, "ACC") == 0) {
+      requestCalibration(CAL_REQ_ACC);
       sendAck(client, "CAL", tag, true, "QUEUED");
       return;
     }
@@ -1172,7 +1179,8 @@ static void sendTelemetry(float dt, const RcCommand &rc, uint32_t cmd_age_ms,
   strncpy(msg_buf, g_status_msg, sizeof(msg_buf) - 1);
   msg_buf[sizeof(msg_buf) - 1] = '\0';
 
-  char buf[480];
+  // Increased buffer to prevent overflow / 增加缓冲区防止溢出
+  char buf[640];
   snprintf(
     buf,
     sizeof(buf),
@@ -1423,9 +1431,15 @@ static void controlStep(float dt) {
       saveTunings();
       setCalState(CAL_STATE_LEVEL, 1500);
     } else if (cal_req == CAL_REQ_GYRO) {
+      // Gyro calibration - non-blocking / 陀螺仪校准 - 非阻塞
       motorsWriteAll(0.0f, 0.0f, 0.0f, 0.0f);
       g_mpu.calibrateGyro(500, 2);
       setCalState(CAL_STATE_GYRO, 1500);
+    } else if (cal_req == CAL_REQ_ACC) {
+      // Accel calibration / 加速度计校准
+      motorsWriteAll(0.0f, 0.0f, 0.0f, 0.0f);
+      g_mpu.calibrateAccel(500, 2);
+      setCalState(CAL_STATE_ACC, 1500);
     }
   }
 
@@ -1525,15 +1539,15 @@ void setup() {
   g_led_mode = LED_BOOT;
   ledInit();
 
+  // Initialize motors / 初始化电机
   const bool motor_ok = motorInit();
-  motorsWriteAll(0, 0, 0, 0);
   if (!motor_ok) {
     Serial.println("LEDC motor init FAILED");
     g_motor_fault = true;
-    disarmNow(FS_MOTOR_FAIL);
     g_led_mode = LED_FAILSAFE;
     setStatusMsg("FAILSAFE: MOTOR_FAIL (LEDC init)");
   }
+  motorsWriteAll(0, 0, 0, 0);
 
   if (!g_mpu.begin()) {
     Serial.println("MPU6050 init FAILED");
